@@ -1,7 +1,7 @@
 {
   "name": "redis_clone",
   "version": "1.0.0",
-  "description": "",
+  "description": "A lightweight Redis clone built using Node.js, implementing core functionalities such as GET, SET, DEL, and advanced features like Pub/Sub, persistence (AOF & RDB), and expiry management.",
   "main": "server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
