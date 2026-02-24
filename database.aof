@@ -1,3 +1,7 @@
- set forth 4 ex 5
-set fifth 5 ex 5
-get fifth
+ DEL new2
+set data value ex 5
+get data
+set data2 val2 ex 10
+get data2
+SET a 10
+SET a 10

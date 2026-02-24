@@ -3,43 +3,66 @@ const handleCommand = require("./command");
 const database = require("./database");
 const expiry = require("./expiry");
 const { loadAOF } = require("./aof");
-const { load_Rdb } = require("./rdb")
-
+const { load_Rdb } = require("./rdb");
+const RESPParser = require("./RESPParser");
 
 const server = net.createServer((socket) => {
-    console.log("New client connected");
+    console.log("New client connected:", socket.remoteAddress);
+
     socket.write("+Welcome to Redis clone!\r\n");
-    let buffer = "";
+
+    // 🔹 Each client gets its own parser
+    const parser = new RESPParser();
 
     socket.on("data", (data) => {
-        buffer+=data.toString();
-        
+        try {
+            // Debug raw TCP payload
+            console.log("RAW:", JSON.stringify(data.toString()));
 
-if (buffer.includes("\r\n")) {
-            const command = buffer.trim();
-            buffer = ""; 
+            const commands = parser.push(data.toString());
 
-            console.log(`Processing command: ${command}`);
-            let res = handleCommand(command);
-            if (!res) res = "-ERROR: Internal server error\r\n";  
+            if (commands.length === 0) {
+                // Incomplete frame — waiting for more TCP data
+                return;
+            }
 
-            socket.write(res);
+            for (const args of commands) {
+                if (!Array.isArray(args) || args.length === 0) continue;
+
+                console.log("Parsed:", args);
+
+                const res = handleCommand(args, socket);
+
+                if (res) {
+                    socket.write(res);
+                }
+            }
+        } catch (err) {
+            console.error("Command processing error:", err);
+            socket.write("-ERR internal server error\r\n");
         }
     });
-
-    /*socket.on("end", () => {
-        console.log("Client disconnected");
-    });*/
 
     socket.on("error", (err) => {
         console.error("Socket error:", err);
     });
+
+    socket.on("close", () => {
+        console.log("Client disconnected:", socket.remoteAddress);
+    });
 });
 
 const PORT = 6379;
+
 server.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
 
-    loadAOF(database, expiry);
-    load_Rdb(database.getAll());
+    // 🔹 Load persistence on startup
+    try {
+        loadAOF(database, expiry);
+        load_Rdb(database.getAll());
+        console.log("Persistence loaded successfully.");
+    } catch (err) {
+        console.error("Persistence loading failed:", err);
+    }
 });
