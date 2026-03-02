@@ -11,7 +11,7 @@ const server = net.createServer((socket) => {
 
     socket.write("+Welcome to Redis clone!\r\n");
 
-    // 🔹 Each client gets its own parser
+    // Each client gets its own parser
     const parser = new RESPParser();
 
     socket.on("data", (data) => {

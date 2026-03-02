@@ -3,7 +3,7 @@ const { appendToAOF } = require("./aof");
 const database = require("./database");
 const expiry = require("./expiry");
 const { save_Rdb } = require("./rdb");
-const { subscribe, publish } = require("./pubsub");
+const { subscribe, publish, unsubscribe } = require("./pubsub");
 
 function wrongArity(command) {
     return `-ERR wrong number of arguments for '${command.toLowerCase()}' command\r\n`;
@@ -116,25 +116,34 @@ function handlePubSubCommand(args, socket) {
         if (args.length !== 2) {
             return wrongArity("SUBSCRIBE");
         }
+
         const channel = args[1];
+
+        // subscribe() already writes RESP acknowledgement to socket
         subscribe(channel, socket);
-        return `+Subscribed to ${channel}\r\n`;
+
+        // Do NOT return string response here
+        return null;
     }
 
     if (command === "PUBLISH") {
         if (args.length < 3) {
             return wrongArity("PUBLISH");
         }
+
         const channel = args[1];
         const message = args.slice(2).join(" ");
-        publish(channel, message);
-        return "+Message published\r\n";
+
+        // publish returns number of subscribers
+        const count = publish(channel, message);
+
+        // Publisher must receive integer reply
+        return `:${count}\r\n`;
     }
 
     return `-ERR unknown command '${command.toLowerCase()}'\r\n`;
 }
 
-// Main handler to decide which function to use
 function handleCommand(args, socket) {
     if (!args || args.length === 0) {
         return "-ERR unknown command\r\n";
