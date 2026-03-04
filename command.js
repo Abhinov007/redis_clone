@@ -126,6 +126,19 @@ function handlePubSubCommand(args, socket) {
         return null;
     }
 
+    if (command === "UNSUBSCRIBE") {
+        if (args.length !== 2) {
+            return wrongArity("UNSUBSCRIBE");
+        }
+
+        const channel = args[1];
+
+        // unsubscribe() writes RESP acknowledgement
+        unsubscribe(channel, socket);
+
+        return null;
+    }
+
     if (command === "PUBLISH") {
         if (args.length < 3) {
             return wrongArity("PUBLISH");
@@ -151,7 +164,7 @@ function handleCommand(args, socket) {
 
     const command = args[0].toUpperCase();
 
-    if (["SUBSCRIBE", "PUBLISH"].includes(command)) {
+    if (["SUBSCRIBE", "UNSUBSCRIBE", "PUBLISH"].includes(command)) {
         return handlePubSubCommand(args, socket);
     }
 

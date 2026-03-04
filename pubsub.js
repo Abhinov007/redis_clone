@@ -53,9 +53,44 @@ function publish(channel, message) {
 
 
 /**
- * Remove socket from all channels
+ * Unsubscribe a socket from a specific channel
+ * Sends RESP-style unsubscribe acknowledgement.
  */
-function unsubscribe(socket) {
+function unsubscribe(channel, socket) {
+    if (!channels.has(channel)) {
+        // No such channel; still send 0 count as Redis does
+        const response =
+            `*3\r\n` +
+            `$11\r\nunsubscribe\r\n` +
+            `$${channel.length}\r\n${channel}\r\n` +
+            `:0\r\n`;
+        socket.write(response);
+        return 0;
+    }
+
+    const subscribers = channels.get(channel);
+    subscribers.delete(socket);
+
+    const remaining = subscribers.size;
+    if (remaining === 0) {
+        channels.delete(channel);
+    }
+
+    const response =
+        `*3\r\n` +
+        `$11\r\nunsubscribe\r\n` +
+        `$${channel.length}\r\n${channel}\r\n` +
+        `:${remaining}\r\n`;
+
+    socket.write(response);
+    return remaining;
+}
+
+
+/**
+ * Remove socket from all channels (on disconnect)
+ */
+function unsubscribeAll(socket) {
     for (const [channel, subscribers] of channels.entries()) {
         subscribers.delete(socket);
 
@@ -68,5 +103,6 @@ function unsubscribe(socket) {
 module.exports = {
     subscribe,
     publish,
-    unsubscribe
+    unsubscribe,
+    unsubscribeAll
 };
