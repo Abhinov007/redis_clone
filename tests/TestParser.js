@@ -1,4 +1,4 @@
-const RESPParser = require("./RESPParser");
+const RESPParser = require("../RESPParser");
 const parser = new RESPParser();
 
 const input =
@@ -6,3 +6,4 @@ const input =
   "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
 
 console.log(parser.push(input));
+

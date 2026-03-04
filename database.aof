@@ -1,10 +1,8 @@
- DEL new2
-set data value ex 5
-get data
-set data2 val2 ex 10
-get data2
-SET a 10
-SET a 10
-SET a 10
-SET a 10
 set foo bar
+lpush list a b c d
+rpush list e
+lpop list
+rpop list
+HSET myhash f1 v1 f2 v2
+HSET myhash f1 v1_new
+SET k v

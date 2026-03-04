@@ -48,7 +48,7 @@ Use `netcat` (nc) or `telnet` to interact with the Redis server.
 ```sh
 echo -ne "PING\r\n"   # PONG
 echo -ne "SET city delhi\r\n"   # +OK
-echo -ne "GET city\r\n"   # +delhi
+echo -ne "GET city\r\n"   # $5<CRLF>delhi<CRLF>
 echo -ne "DEL city\r\n"  # :1
 echo -ne "FLUSHALL\r\n"   # +OK
 ```
@@ -77,7 +77,33 @@ echo -ne "PUBLISH news 'Hello, Redis Clone!'\r\n" | nc localhost 6379
 The subscriber terminal should receive:
 
 ```
-+Message received on news: Hello, Redis Clone!
+*3
+$7
+message
+$4
+news
+$18
+Hello, Redis Clone!
+```
+
+#### **Lists**
+
+```sh
+echo -ne "LPUSH mylist a b\r\n"     # :2
+echo -ne "RPUSH mylist c\r\n"       # :3
+echo -ne "LRANGE mylist 0 -1\r\n"   # *3 bulk strings
+echo -ne "LPOP mylist\r\n"          # bulk string
+echo -ne "LLEN mylist\r\n"          # integer
+```
+
+#### **Hashes**
+
+```sh
+echo -ne "HSET myhash f1 v1 f2 v2\r\n"  # :2
+echo -ne "HGET myhash f1\r\n"           # bulk string
+echo -ne "HEXISTS myhash f3\r\n"        # :0 or :1
+echo -ne "HGETALL myhash\r\n"           # array [field, value, ...]
+echo -ne "HLEN myhash\r\n"              # integer
 ```
 
 ## Code Structure
