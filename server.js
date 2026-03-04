@@ -70,6 +70,13 @@ const server = net.createServer((socket) => {
         unsubscribeAll(socket);
         console.log("Client disconnected:", socket.remoteAddress);
     });
+
+    server.on("connection", (socket) => {
+        socket.tx = {
+            active: false,
+            queue: []
+        };
+    });
 });
 
 const PORT = 6379;

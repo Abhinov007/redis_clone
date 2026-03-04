@@ -1,8 +1,2 @@
-set foo bar
-lpush list a b c d
-rpush list e
-lpop list
-rpop list
-HSET myhash f1 v1 f2 v2
-HSET myhash f1 v1_new
-SET k v
+SET PKEY PVALUE
+hset phash field value

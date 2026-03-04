@@ -18,6 +18,46 @@ function parseInteger(value) {
     return n;
 }
 
+function handleMulti(socket) {
+    if (socket.tx.active) {
+        return respError("ERR MULTI calls can not be nested");
+    }
+
+    socket.tx.active = true;
+    socket.tx.queue = [];
+
+    return respSimpleString("OK");
+}
+
+function handleExec(socket) {
+    if (!socket.tx.active) {
+        return respError("ERR EXEC without MULTI");
+    }
+
+    const replies = [];
+
+    for (const cmd of socket.tx.queue) {
+        const reply = handleCoreCommand(cmd.args, socket);
+        replies.push(reply);
+    }
+
+    socket.tx.active = false;
+    socket.tx.queue = [];
+
+    return respArray(replies);
+}
+
+function handleDiscard(socket) {
+    if (!socket.tx.active) {
+        return respError("ERR DISCARD without MULTI");
+    }
+
+    socket.tx.active = false;
+    socket.tx.queue = [];
+
+    return respSimpleString("OK");
+}
+
 function handleCoreCommand(args, socket) {
     if (!args || args.length === 0) {
         return respError("ERR unknown command");
@@ -423,8 +463,23 @@ function handleCommand(args, socket) {
     if (!args || args.length === 0) {
         return respError("ERR unknown command");
     }
-
+    
     const command = args[0].toUpperCase();
+
+     // Ensure tx state exists
+     if (!socket.tx) {
+        socket.tx = { active: false, queue: [] };
+    }
+
+    // Transaction control commands
+    if (command === "MULTI") return handleMulti(socket);
+    if (command === "EXEC") return handleExec(socket);
+    if (command === "DISCARD") return handleDiscard(socket);
+
+        // If in transaction → queue
+        if (command === "END") {
+            return handleCoreCommand(args, socket);
+        }
 
     if (["SUBSCRIBE", "UNSUBSCRIBE", "PUBLISH"].includes(command)) {
         return handlePubSubCommand(args, socket);

@@ -1,1 +1,1 @@
-{"foo":{"type":"string","value":"bar"},"list":{"type":"list","value":["c","b","a","c","b","a"]},"myhash":{"type":"hash","value":{"f1":"v1_new","f2":"v2"}},"k":{"type":"string","value":"v"}}
+{"PKEY":{"type":"string","value":"PVALUE"},"phash":{"type":"hash","value":{"field":"value"}}}
