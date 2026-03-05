@@ -511,6 +511,90 @@ async function testRapidFirePropagation() {
     replica.end();
 }
 
+async function testReplconfHandshake() {
+    console.log("\n═══ Test 15: REPLCONF Handshake ═══");
+
+    const master = await createConnection();
+    await drainWelcome(master);
+
+    const dataPort = await sendCommand(master, ["REPLCONF", "listening-port", "6380"]);
+    assert(dataPort.includes("+OK"), "REPLCONF listening-port returns +OK");
+
+    const dataCapa = await sendCommand(master, ["REPLCONF", "capa", "psync2"]);
+    assert(dataCapa.includes("+OK"), "REPLCONF capa returns +OK");
+
+    master.end();
+}
+
+async function testPsyncFullResync() {
+    console.log("\n═══ Test 16: PSYNC ? -1 (Initial Full Resync) ═══");
+
+    const master = await createConnection();
+    await drainWelcome(master);
+
+    // PSYNC with unknown ID should trigger FULLRESYNC
+    const data = await sendCommand(master, ["PSYNC", "?", "-1"]);
+    
+    assert(data.includes("+FULLRESYNC"), "PSYNC ? -1 returns +FULLRESYNC");
+    assert(data.split(" ").length === 3, "FULLRESYNC response includes replId and offset");
+
+    master.end();
+}
+
+async function testPartialResync() {
+    console.log("\n═══ Test 17: Partial Resync (PSYNC +CONTINUE) ═══");
+
+    const master = await createConnection();
+    await drainWelcome(master);
+
+    // 1. Get a valid replId and offset via an initial PSYNC
+    const initData = await sendCommand(master, ["PSYNC", "?", "-1"]);
+    assert(initData.includes("+FULLRESYNC"), "Got initial FULLRESYNC");
+
+    const parts = initData.split("\r\n")[0].split(" "); // e.g. "+FULLRESYNC <id> <offset>"
+    const replId = parts[1];
+    const offset = parseInt(parts[2], 10);
+
+    // Drain the RDB snapshot that follows
+    await collectData(master, 200);
+
+    // 2. Disconnect the replica
+    master.end();
+
+    // 3. Reconnect and send PSYNC with the saved replId and offset
+    const replica2 = await createConnection();
+    await drainWelcome(replica2);
+
+    const contData = await sendCommand(replica2, ["PSYNC", replId, String(offset)]);
+    
+    assert(contData.includes("+CONTINUE"), "PSYNC with valid ID and offset returns +CONTINUE");
+    
+    replica2.end();
+}
+
+async function testAckHeartbeat() {
+    console.log("\n═══ Test 18: REPLCONF ACK Heartbeat ═══");
+
+    const master = await createConnection();
+    await drainWelcome(master);
+
+    // Register as replica
+    await sendCommand(master, ["REPLCONF", "listening-port", "6380"]);
+    await sendCommand(master, ["REPLCONF", "capa", "psync2"]);
+    await sendCommand(master, ["PSYNC", "?", "-1"]);
+    await collectData(master, 200); // drain FULLRESYNC + RDB
+
+    // ACKs send no response back in Redis, so we just verify it doesn't error/disconnect
+    master.write(toRESP(["REPLCONF", "ACK", "42"]));
+    
+    // Send a PING to ensure connection is still alive and parsing works
+    const pingResp = await sendCommand(master, ["PING"]);
+    
+    assert(pingResp.includes("PONG"), "Connection alive after REPLCONF ACK");
+
+    master.end();
+}
+
 // ─── Run all tests ────────────────────────────────────────────────────────────
 
 async function runAll() {
@@ -534,6 +618,10 @@ async function runAll() {
         await testTransactionReplication();
         await testReadCommandsNotPropagated();
         await testRapidFirePropagation();
+        await testReplconfHandshake();
+        await testPsyncFullResync();
+        await testPartialResync();
+        await testAckHeartbeat();
     } catch (err) {
         console.error("\n💥 Unexpected error:", err);
     }

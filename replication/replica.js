@@ -12,22 +12,37 @@ let masterSocket = null;
 let masterHost = null;
 let masterPort = null;
 let reconnectTimer = null;
+let ackInterval = null;
 
-// Sync state machine: WAIT_WELCOME → WAIT_OK → WAIT_FULLRESYNC → WAIT_RDB → STREAMING
+// Replication state (persisted across reconnects for partial resync)
+let masterReplId = null;     // saved from FULLRESYNC/CONTINUE
+let replicaOffset = 0;       // bytes of RESP commands consumed
+
+// Sync state machine
+// WAIT_WELCOME → REPLCONF_PORT → REPLCONF_CAPA → PSYNC → WAIT_SYNC_RESPONSE
+//   → (FULLRESYNC path: WAIT_RDB_LEN → WAIT_RDB_DATA)
+//   → (CONTINUE path: straight to STREAMING)
+//   → STREAMING
 let syncState = "WAIT_WELCOME";
 let rdbExpectedLen = -1;
 let rdbBuffer = "";
 
 const RECONNECT_DELAY_MS = 3000;
+const ACK_INTERVAL_MS = 1000;
+let localPort = null; // our listening port (set from server.js)
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
  * Start the replica — connect to the master and begin replication.
+ * @param {string} host - Master hostname
+ * @param {number} port - Master port
+ * @param {number} [myPort] - This server's listening port (for REPLCONF)
  */
-function startReplica(host, port) {
+function startReplica(host, port, myPort) {
     masterHost = host;
     masterPort = port;
+    localPort = myPort || 0;
     connectToMaster();
 }
 
@@ -37,6 +52,10 @@ function connectToMaster() {
     if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
+    }
+    if (ackInterval) {
+        clearInterval(ackInterval);
+        ackInterval = null;
     }
 
     syncState = "WAIT_WELCOME";
@@ -57,6 +76,10 @@ function connectToMaster() {
 
     masterSocket.on("close", () => {
         console.log("[replica] Disconnected from master.");
+        if (ackInterval) {
+            clearInterval(ackInterval);
+            ackInterval = null;
+        }
         scheduleReconnect();
     });
 }
@@ -70,7 +93,7 @@ function scheduleReconnect() {
     }, RECONNECT_DELAY_MS);
 }
 
-// ─── RESP encoder (for sending commands to master) ────────────────────────────
+// ─── RESP Encoder ─────────────────────────────────────────────────────────────
 
 function encodeRESP(args) {
     let resp = `*${args.length}\r\n`;
@@ -81,7 +104,7 @@ function encodeRESP(args) {
     return resp;
 }
 
-// ─── Data handler (state machine) ─────────────────────────────────────────────
+// ─── Data Handler (state machine) ─────────────────────────────────────────────
 
 let lineBuffer = "";
 const respParser = new RESPParser();
@@ -89,14 +112,14 @@ const respParser = new RESPParser();
 function handleMasterData(data) {
     const chunk = data.toString();
 
-    // ── Phase 1-3: Line-based protocol (welcome, +OK, +FULLRESYNC, $len) ──
+    // During sync phases, use line-based parsing
     if (syncState !== "STREAMING") {
         lineBuffer += chunk;
         processLineBuffer();
         return;
     }
 
-    // ── Phase 4: STREAMING — parse RESP commands from master ──
+    // During streaming, parse RESP commands
     applyReplicatedCommands(chunk);
 }
 
@@ -108,41 +131,82 @@ function processLineBuffer() {
         const line = lineBuffer.slice(0, nlIndex);
         lineBuffer = lineBuffer.slice(nlIndex + 2);
 
-        // ── WAIT_WELCOME: consume "+Welcome to Redis clone!" ──
+        // ── WAIT_WELCOME ──
         if (syncState === "WAIT_WELCOME") {
             console.log("[replica] Master says:", line);
-            syncState = "WAIT_OK";
+            syncState = "REPLCONF_PORT";
 
-            // Send REPLICAOF to register as a replica
-            masterSocket.write(encodeRESP(["REPLICAOF", masterHost, String(masterPort)]));
-            console.log("[replica] Sent REPLICAOF to master.");
+            // Step 1: Send REPLCONF listening-port
+            masterSocket.write(encodeRESP(["REPLCONF", "listening-port", String(localPort)]));
+            console.log(`[replica] Sent REPLCONF listening-port ${localPort}`);
             continue;
         }
 
-        // ── WAIT_OK: consume "+OK" ──
-        if (syncState === "WAIT_OK") {
+        // ── REPLCONF_PORT — waiting for +OK ──
+        if (syncState === "REPLCONF_PORT") {
             if (line === "+OK") {
-                console.log("[replica] Master accepted REPLICAOF.");
-                syncState = "WAIT_FULLRESYNC";
+                syncState = "REPLCONF_CAPA";
+
+                // Step 2: Send REPLCONF capa psync2
+                masterSocket.write(encodeRESP(["REPLCONF", "capa", "psync2"]));
+                console.log("[replica] Sent REPLCONF capa psync2");
             } else {
-                console.error("[replica] Unexpected response (expected +OK):", line);
+                console.error("[replica] Unexpected response (expected +OK for listening-port):", line);
             }
             continue;
         }
 
-        // ── WAIT_FULLRESYNC: consume "+FULLRESYNC <replid> <offset>" ──
-        if (syncState === "WAIT_FULLRESYNC") {
+        // ── REPLCONF_CAPA — waiting for +OK ──
+        if (syncState === "REPLCONF_CAPA") {
+            if (line === "+OK") {
+                syncState = "WAIT_SYNC_RESPONSE";
+
+                // Step 3: Send PSYNC
+                const psyncReplId = masterReplId || "?";
+                const psyncOffset = masterReplId ? String(replicaOffset) : "-1";
+
+                masterSocket.write(encodeRESP(["PSYNC", psyncReplId, psyncOffset]));
+                console.log(`[replica] Sent PSYNC ${psyncReplId} ${psyncOffset}`);
+            } else {
+                console.error("[replica] Unexpected response (expected +OK for capa):", line);
+            }
+            continue;
+        }
+
+        // ── WAIT_SYNC_RESPONSE — expecting +FULLRESYNC or +CONTINUE ──
+        if (syncState === "WAIT_SYNC_RESPONSE") {
             if (line.startsWith("+FULLRESYNC")) {
+                // Full resync path
                 const parts = line.split(" ");
-                console.log(`[replica] FULLRESYNC — replid=${parts[1]}, offset=${parts[2]}`);
+                masterReplId = parts[1];
+                replicaOffset = parseInt(parts[2], 10) || 0;
+                console.log(`[replica] FULLRESYNC — replid=${masterReplId}, offset=${replicaOffset}`);
                 syncState = "WAIT_RDB_LEN";
+            } else if (line.startsWith("+CONTINUE")) {
+                // Partial resync — no RDB transfer needed!
+                const parts = line.split(" ");
+                if (parts[1]) masterReplId = parts[1];
+                console.log(`[replica] CONTINUE — partial resync! replid=${masterReplId}, offset=${replicaOffset}`);
+
+                // Go straight to streaming
+                syncState = "STREAMING";
+                startAckHeartbeat();
+                console.log("[replica] Partial sync complete. Now streaming commands from master.");
+
+                // Any remaining data in lineBuffer is RESP commands
+                if (lineBuffer.length > 0) {
+                    const remaining = lineBuffer;
+                    lineBuffer = "";
+                    applyReplicatedCommands(remaining);
+                }
+                return;
             } else {
-                console.error("[replica] Unexpected response (expected +FULLRESYNC):", line);
+                console.error("[replica] Unexpected sync response:", line);
             }
             continue;
         }
 
-        // ── WAIT_RDB_LEN: consume "$<length>" ──
+        // ── WAIT_RDB_LEN — expecting "$<length>" ──
         if (syncState === "WAIT_RDB_LEN") {
             if (line.startsWith("$")) {
                 rdbExpectedLen = parseInt(line.slice(1), 10);
@@ -150,11 +214,11 @@ function processLineBuffer() {
                 console.log(`[replica] Expecting RDB snapshot of ${rdbExpectedLen} bytes.`);
 
                 if (rdbExpectedLen === 0) {
-                    // Empty snapshot
                     console.log("[replica] Empty snapshot — starting with empty database.");
                     syncState = "STREAMING";
+                    startAckHeartbeat();
                     console.log("[replica] Sync complete. Now streaming commands from master.");
-                    // Any remaining data in lineBuffer is RESP commands
+
                     if (lineBuffer.length > 0) {
                         const remaining = lineBuffer;
                         lineBuffer = "";
@@ -162,7 +226,6 @@ function processLineBuffer() {
                     }
                 } else {
                     syncState = "WAIT_RDB_DATA";
-                    // Whatever is left in lineBuffer is part of the RDB data
                     if (lineBuffer.length > 0) {
                         rdbBuffer += lineBuffer;
                         lineBuffer = "";
@@ -176,7 +239,7 @@ function processLineBuffer() {
         }
     }
 
-    // ── WAIT_RDB_DATA: accumulate raw RDB bytes ──
+    // ── WAIT_RDB_DATA — accumulate raw RDB bytes ──
     if (syncState === "WAIT_RDB_DATA" && lineBuffer.length > 0) {
         rdbBuffer += lineBuffer;
         lineBuffer = "";
@@ -186,22 +249,22 @@ function processLineBuffer() {
 
 function checkRDBComplete() {
     if (rdbBuffer.length >= rdbExpectedLen) {
-        // Extract exactly rdbExpectedLen bytes
         const snapshotData = rdbBuffer.slice(0, rdbExpectedLen);
         let remaining = rdbBuffer.slice(rdbExpectedLen);
 
-        // The master sends \r\n after the RDB data — strip it
+        // Strip trailing \r\n sent by master after RDB data
         if (remaining.startsWith("\r\n")) {
             remaining = remaining.slice(2);
         }
 
-        // Clear and load the snapshot into the local database
+        // Clear and load the snapshot
         database.clearDatabase();
         loadRDBFromBuffer(snapshotData, database.getAll());
         console.log("[replica] RDB snapshot loaded successfully.");
 
         // Transition to streaming
         syncState = "STREAMING";
+        startAckHeartbeat();
         console.log("[replica] Sync complete. Now streaming commands from master.");
 
         // Any leftover data is RESP commands
@@ -211,9 +274,26 @@ function checkRDBComplete() {
     }
 }
 
-// ─── Apply replicated write commands ──────────────────────────────────────────
+// ─── ACK Heartbeat ────────────────────────────────────────────────────────────
+
+function startAckHeartbeat() {
+    if (ackInterval) clearInterval(ackInterval);
+
+    ackInterval = setInterval(() => {
+        if (masterSocket && !masterSocket.destroyed) {
+            masterSocket.write(encodeRESP(["REPLCONF", "ACK", String(replicaOffset)]));
+        }
+    }, ACK_INTERVAL_MS);
+
+    console.log(`[replica] ACK heartbeat started (every ${ACK_INTERVAL_MS}ms)`);
+}
+
+// ─── Apply Replicated Commands ────────────────────────────────────────────────
 
 function applyReplicatedCommands(chunk) {
+    // Track the byte length for offset calculation
+    const chunkByteLen = Buffer.byteLength(chunk);
+
     const commands = respParser.push(chunk);
 
     for (const args of commands) {
@@ -223,9 +303,8 @@ function applyReplicatedCommands(chunk) {
         console.log("[replica] Applying replicated command:", args.join(" "));
 
         // Create a fake socket so handleCommand doesn't crash
-        // (it may try to write a response back — we discard it)
         const fakeSocket = {
-            write: () => {},       // discard responses
+            write: () => {},
             isReplica: true,
             tx: { active: false, queue: [] }
         };
@@ -236,6 +315,9 @@ function applyReplicatedCommands(chunk) {
             console.error("[replica] Error applying command:", cmd, err.message);
         }
     }
+
+    // Update offset by the byte length of the data we consumed
+    replicaOffset += chunkByteLen;
 }
 
 // ─── Exports ──────────────────────────────────────────────────────────────────

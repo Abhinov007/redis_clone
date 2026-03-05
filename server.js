@@ -117,11 +117,26 @@ function processCommand(args, socket) {
         return;
     }
 
-    // 🔥 REPLICAOF handling (master side)
+    // ─── REPLCONF handling (master side) ───
+    if (command === "REPLCONF") {
+        const resp = replication.handleReplconf(args, socket);
+        if (resp) socket.write(resp);
+        return;
+    }
+
+    // ─── PSYNC handling (master side) ───
+    if (command === "PSYNC") {
+        const resp = replication.handlePsync(args, socket);
+        if (resp) socket.write(resp);
+        return;
+    }
+
+    // 🔥 REPLICAOF handling (backward compat — triggers full sync via PSYNC)
     if (command === "REPLICAOF") {
-        replication.registerReplica(socket);
+        // Treat as PSYNC ? -1 (full sync)
+        const resp = replication.handlePsync(["PSYNC", "?", "-1"], socket);
         socket.write("+OK\r\n");
-        replication.sendFullSync(socket);
+        if (resp) socket.write(resp);
         return;
     }
 
@@ -186,6 +201,10 @@ function processCommand(args, socket) {
 }
 
 // ================= START SERVER =================
+
+// Initialize master replication state (replid, offset, backlog)
+replication.initMaster();
+
 server.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}${isReplicaServer ? " (REPLICA)" : " (MASTER)"}`);
 
@@ -200,6 +219,6 @@ server.listen(PORT, () => {
     // 🔁 If --replicaof was specified, start replication
     if (isReplicaServer) {
         console.log(`Starting replication: connecting to master at ${replicaOfHost}:${replicaOfPort}`);
-        startReplica(replicaOfHost, replicaOfPort);
+        startReplica(replicaOfHost, replicaOfPort, PORT);
     }
 });
