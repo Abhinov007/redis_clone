@@ -1,9 +1,19 @@
 const net = require("net");
 const readline = require("readline");
 
+// Parse --port argument
+const args = process.argv.slice(2);
+let port = 6379;
+for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--port" && args[i + 1]) {
+        port = parseInt(args[i + 1], 10);
+        i++;
+    }
+}
+
 // Create a connection to the server
-const client = net.createConnection({ port: 6379 }, () => {
-    console.log("Connected to Redis Clone Server");
+const client = net.createConnection({ port }, () => {
+    console.log(`Connected to Redis Clone Server on port ${port}`);
 });
 
 // Read input from the terminal

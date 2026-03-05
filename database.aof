@@ -1,2 +1,24 @@
-SET PKEY PVALUE
-hset phash field value
+SET multi_rep hello
+DEL multi_rep
+SET after_disconnect ok
+DEL after_disconnect
+SET loop_test val
+DEL loop_test
+SET tx_key1 a
+SET tx_key2 b
+DEL tx_key1
+DEL tx_key2
+SET read_test 123
+DEL read_test
+SET burst_0 v0
+SET burst_1 v1
+SET burst_3 v3
+SET burst_2 v2
+SET burst_4 v4
+DEL burst_0
+DEL burst_1
+DEL burst_3
+DEL burst_2
+DEL burst_4
+set hello world
+set hello world

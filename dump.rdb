@@ -1,1 +1,1 @@
-{"PKEY":{"type":"string","value":"PVALUE"},"phash":{"type":"hash","value":{"field":"value"}}}
+{"hello":{"type":"string","value":"world"}}

@@ -85,4 +85,49 @@ function load_Rdb(database) {
     }
 }
 
-module.exports = { save_Rdb, load_Rdb };
+/**
+ * Load an RDB snapshot from a raw buffer/string (used by replica sync).
+ * Same parsing logic as load_Rdb but reads from memory instead of a file.
+ */
+function loadRDBFromBuffer(buffer, database) {
+    try {
+        const data = typeof buffer === "string" ? buffer : buffer.toString("utf-8");
+        if (!data || data.trim().length === 0) {
+            console.log("Empty RDB snapshot received, starting with empty database.");
+            return;
+        }
+
+        const parsed = JSON.parse(data);
+
+        for (const [key, stored] of Object.entries(parsed || {})) {
+            if (stored == null) continue;
+
+            if (typeof stored === "string") {
+                database.set(key, { type: "string", value: stored });
+                continue;
+            }
+
+            if (typeof stored === "object" && stored.type) {
+                if (stored.type === "string") {
+                    database.set(key, { type: "string", value: String(stored.value) });
+                } else if (stored.type === "list") {
+                    const arr = Array.isArray(stored.value) ? stored.value.map((v) => String(v)) : [];
+                    database.set(key, { type: "list", value: arr });
+                } else if (stored.type === "hash") {
+                    const obj = stored.value && typeof stored.value === "object" ? stored.value : {};
+                    database.set(key, { type: "hash", value: new Map(Object.entries(obj)) });
+                }
+                continue;
+            }
+
+            // Fallback
+            database.set(key, { type: "string", value: String(stored) });
+        }
+
+        console.log(`Loaded ${database.size} keys from RDB snapshot.`);
+    } catch (error) {
+        console.error("Error loading RDB from buffer:", error);
+    }
+}
+
+module.exports = { save_Rdb, load_Rdb, loadRDBFromBuffer };
