@@ -58,12 +58,31 @@ function handleDiscard(socket) {
     return respSimpleString("OK");
 }
 
-function handleCoreCommand(args, socket) {
+/**
+ * Execute a core (non-pub/sub, non-transaction) command.
+ *
+ * @param {string[]}  args   - Tokenised command e.g. ['SET', 'key', 'val']
+ * @param {object}    socket - Client socket (used only by END command)
+ * @param {object}    opts   - Options
+ * @param {boolean}   opts.replay - When true, skip AOF append and RDB save.
+ *                                  Used by loadAOF() to replay commands on
+ *                                  startup without re-logging them.
+ *
+ * @example
+ * // Normal execution (writes to AOF + schedules RDB)
+ * handleCoreCommand(['SET', 'name', 'Alice'], socket)
+ *
+ * @example
+ * // AOF replay (data mutation only, no persistence side-effects)
+ * handleCoreCommand(['SET', 'name', 'Alice'], nullSocket, { replay: true })
+ */
+function handleCoreCommand(args, socket, opts = {}) {
     if (!args || args.length === 0) {
         return respError("ERR unknown command");
     }
 
     const command = args[0].toUpperCase();
+    const replay  = opts.replay === true;
 
     if (command === "PING") {
         if (args.length !== 1) {
@@ -93,13 +112,12 @@ function handleCoreCommand(args, socket) {
 
         // SET overwrites any existing type, like real Redis
         database.setString(key, value);
-        appendToAOF(args.join(" "));
+        if (ttl !== null) expiry.setExpiry(key, ttl);
 
-        if (ttl !== null) {
-            expiry.setExpiry(key, ttl);
+        if (!replay) {
+            appendToAOF(args.join(" "));
+            scheduleSave(database.getAll());
         }
-
-        scheduleSave(database.getAll());
         return respSimpleString("OK");
     }
 
@@ -111,7 +129,8 @@ function handleCoreCommand(args, socket) {
         const key = args[1];
 
         if (expiry.isExpired(key)) {
-            appendToAOF(`DEL ${key}`);
+            // Key expired lazily — log the deletion (only during live execution)
+            if (!replay) appendToAOF(`DEL ${key}`);
             return respBulk(null);
         }
 
@@ -149,9 +168,10 @@ function handleCoreCommand(args, socket) {
             }
         }
 
-        appendToAOF(args.join(" "));
-        scheduleSave(database.getAll());
-
+        if (!replay) {
+            appendToAOF(args.join(" "));
+            scheduleSave(database.getAll());
+        }
         return respInt(list.length);
     }
 
@@ -171,13 +191,12 @@ function handleCoreCommand(args, socket) {
 
         const value = command === "LPOP" ? list.shift() : list.pop();
 
-        if (list.length === 0) {
-            database.deleteKey(key);
+        if (list.length === 0) database.deleteKey(key);
+
+        if (!replay) {
+            appendToAOF(args.join(" "));
+            scheduleSave(database.getAll());
         }
-
-        appendToAOF(args.join(" "));
-        scheduleSave(database.getAll());
-
         return respBulk(value);
     }
 
@@ -256,8 +275,10 @@ function handleCoreCommand(args, socket) {
             hash.set(field, value);
         }
 
-        appendToAOF(args.join(" "));
-        scheduleSave(database.getAll());
+        if (!replay) {
+            appendToAOF(args.join(" "));
+            scheduleSave(database.getAll());
+        }
 
         return respInt(newFields);
     }
@@ -306,7 +327,7 @@ function handleCoreCommand(args, socket) {
             database.deleteKey(key);
         }
 
-        if (removed > 0) {
+        if (removed > 0 && !replay) {
             appendToAOF(args.join(" "));
             scheduleSave(database.getAll());
         }
@@ -382,8 +403,11 @@ function handleCoreCommand(args, socket) {
         const key = args[1];
         const existed = database.getEntry(key) != null;
         database.deleteKey(key);
-        appendToAOF(`DEL ${key}`);
-        scheduleSave(database.getAll());
+        expiry.clearEntryExpiry(key);
+        if (!replay) {
+            appendToAOF(`DEL ${key}`);
+            scheduleSave(database.getAll());
+        }
         return respInt(existed ? 1 : 0);
     }
 
@@ -402,13 +426,46 @@ function handleCoreCommand(args, socket) {
 
         database.clearDatabase();
         expiry.clearExpiry();
-        // Truncate AOF asynchronously — no need to block for a housekeeping command
-        fs.writeFile("database.aof", "", (err) => {
-            if (err) console.error("[AOF] Error truncating on FLUSHALL:", err);
-        });
-        scheduleSave(database.getAll());
+        if (!replay) {
+            // Truncate AOF asynchronously — no need to block for a housekeeping command
+            fs.writeFile("database.aof", "", (err) => {
+                if (err) console.error("[AOF] Error truncating on FLUSHALL:", err);
+            });
+            scheduleSave(database.getAll());
+        }
 
         return respSimpleString("OK");
+    }
+
+    if (command === "INCR" || command === "DECR") {
+        if (args.length !== 2) return wrongArity(command);
+
+        const key = args[1];
+
+        // Lazy expiry — treat an expired key as if it never existed
+        if (expiry.isExpired(key)) {
+            if (!replay) appendToAOF(`DEL ${key}`);
+        }
+
+        const existing = database.getString(key);
+        if (existing === undefined) {
+            // Key holds a non-string type
+            return respError(WRONGTYPE);
+        }
+
+        const current = existing == null ? 0 : parseInt(existing, 10);
+        if (Number.isNaN(current)) {
+            return respError("ERR value is not an integer or out of range");
+        }
+
+        const next = command === "INCR" ? current + 1 : current - 1;
+        database.setString(key, String(next));
+
+        if (!replay) {
+            appendToAOF(args.join(" "));
+            scheduleSave(database.getAll());
+        }
+        return respInt(next);
     }
 
     return respError(`ERR unknown command '${command.toLowerCase()}'`);
@@ -491,4 +548,15 @@ function handleCommand(args, socket) {
     return handleCoreCommand(args, socket);
 }
 
+/**
+ * Replay a single AOF command without writing back to AOF or triggering
+ * an RDB save. Used exclusively by loadAOF() on startup.
+ *
+ * @param {string[]} args  - Tokenised command, e.g. ['SET', 'k', 'v']
+ */
+function replayCommand(args) {
+    return handleCoreCommand(args, null, { replay: true });
+}
+
 module.exports = handleCommand;
+module.exports.replayCommand = replayCommand;
