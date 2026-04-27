@@ -2,7 +2,7 @@ const fs = require("fs");
 const { appendToAOF } = require("../persistence/aof");
 const database = require("../storage/database");
 const expiry = require("../storage/expiry");
-const { save_Rdb } = require("../persistence/rdb");
+const { scheduleSave } = require("../persistence/rdb");
 const { subscribe, publish, unsubscribe } = require("../messaging/pubsub");
 const { respSimpleString, respError, respInt, respBulk, respArray, respArrayOfBulks } = require("../protocol/resp");
 
@@ -99,7 +99,7 @@ function handleCoreCommand(args, socket) {
             expiry.setExpiry(key, ttl);
         }
 
-        save_Rdb(database.getAll());
+        scheduleSave(database.getAll());
         return respSimpleString("OK");
     }
 
@@ -150,7 +150,7 @@ function handleCoreCommand(args, socket) {
         }
 
         appendToAOF(args.join(" "));
-        save_Rdb(database.getAll());
+        scheduleSave(database.getAll());
 
         return respInt(list.length);
     }
@@ -176,7 +176,7 @@ function handleCoreCommand(args, socket) {
         }
 
         appendToAOF(args.join(" "));
-        save_Rdb(database.getAll());
+        scheduleSave(database.getAll());
 
         return respBulk(value);
     }
@@ -257,7 +257,7 @@ function handleCoreCommand(args, socket) {
         }
 
         appendToAOF(args.join(" "));
-        save_Rdb(database.getAll());
+        scheduleSave(database.getAll());
 
         return respInt(newFields);
     }
@@ -308,7 +308,7 @@ function handleCoreCommand(args, socket) {
 
         if (removed > 0) {
             appendToAOF(args.join(" "));
-            save_Rdb(database.getAll());
+            scheduleSave(database.getAll());
         }
 
         return respInt(removed);
@@ -383,7 +383,7 @@ function handleCoreCommand(args, socket) {
         const existed = database.getEntry(key) != null;
         database.deleteKey(key);
         appendToAOF(`DEL ${key}`);
-        save_Rdb(database.getAll());
+        scheduleSave(database.getAll());
         return respInt(existed ? 1 : 0);
     }
 
@@ -402,8 +402,11 @@ function handleCoreCommand(args, socket) {
 
         database.clearDatabase();
         expiry.clearExpiry();
-        fs.writeFileSync("database.aof", "");
-        save_Rdb(database.getAll());
+        // Truncate AOF asynchronously — no need to block for a housekeeping command
+        fs.writeFile("database.aof", "", (err) => {
+            if (err) console.error("[AOF] Error truncating on FLUSHALL:", err);
+        });
+        scheduleSave(database.getAll());
 
         return respSimpleString("OK");
     }

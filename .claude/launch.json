@@ -1,0 +1,30 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Redis Sandbox",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "sandbox",
+      "port": 5173
+    },
+    {
+      "name": "Redis Server (Master)",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["redis_clone/server.js"],
+      "port": 6379
+    },
+    {
+      "name": "Redis Server (Replica)",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["redis_clone/server.js", "--port", "6380", "--replicaof", "localhost", "6379"],
+      "port": 6380
+    },
+    {
+      "name": "Redis Client",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["redis_clone/client.js"],
+      "port": 6381
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Users/91974/Desktop/redis_clone -type f -name *.js)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(npm install:*)",
+      "Bash(npm run:*)",
+      "Bash(node -e ' *)"
+    ]
+  }
+}

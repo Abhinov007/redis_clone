@@ -3,7 +3,7 @@ const handleCommand = require("./commands/command");
 const database = require("./storage/database");
 const expiry = require("./storage/expiry");
 const { loadAOF } = require("./persistence/aof");
-const { load_Rdb } = require("./persistence/rdb");
+const { load_Rdb, forceSave } = require("./persistence/rdb");
 const { unsubscribeAll } = require("./messaging/pubsub");
 const RESPParser = require("./RESPParser");
 const replication = require("./replication/master");
@@ -108,6 +108,22 @@ const server = net.createServer((socket) => {
 
 // ================= COMMAND PROCESSOR =================
 function processCommand(args, socket) {
+    // ─── Fix #2: per-command error boundary ──────────────────────────────────
+    // Any unhandled exception inside a single command handler is caught here.
+    // The client gets a clean error response; the server keeps running.
+    try {
+        _processCommand(args, socket);
+    } catch (err) {
+        console.error(`[ERROR] Unexpected error processing command '${args?.[0]}':`, err);
+        try {
+            socket.write("-ERR internal server error\r\n");
+        } catch (_) {
+            // Socket may have been closed — nothing to do
+        }
+    }
+}
+
+function _processCommand(args, socket) {
     const command = args[0].toUpperCase();
     console.log("Parsed:", args);
 
@@ -133,7 +149,6 @@ function processCommand(args, socket) {
 
     // 🔥 REPLICAOF handling (backward compat — triggers full sync via PSYNC)
     if (command === "REPLICAOF") {
-        // Treat as PSYNC ? -1 (full sync)
         const resp = replication.handlePsync(["PSYNC", "?", "-1"], socket);
         socket.write("+OK\r\n");
         if (resp) socket.write(resp);
@@ -164,10 +179,18 @@ function processCommand(args, socket) {
         const results = [];
 
         for (const queuedArgs of socket.tx.queue) {
-            const res = handleCommand(queuedArgs, socket);
+            // ─── Fix #2: isolate each queued command so one failure
+            //     doesn't abort the rest of the EXEC batch ────────────────────
+            let res;
+            try {
+                res = handleCommand(queuedArgs, socket);
+            } catch (err) {
+                console.error(`[ERROR] EXEC command '${queuedArgs?.[0]}' failed:`, err);
+                res = "-ERR internal server error\r\n";
+            }
             results.push(res || "$-1\r\n");
 
-            // ✅ replicate write commands inside EXEC
+            // ✅ Replicate write commands inside EXEC
             if (!socket.isReplica && isWriteCommand(queuedArgs[0])) {
                 replication.propagateToReplicas(queuedArgs, socket);
             }
@@ -222,3 +245,31 @@ server.listen(PORT, () => {
         startReplica(replicaOfHost, replicaOfPort, PORT);
     }
 });
+
+// ================= FIX #3: GRACEFUL SHUTDOWN =================
+// Catches SIGINT (Ctrl+C) and SIGTERM (kill / Docker stop / PM2 restart).
+// Before exiting: stops accepting connections, writes a final RDB snapshot,
+// then exits cleanly. Prevents dump.rdb corruption on mid-write crashes.
+
+function gracefulShutdown(signal) {
+    console.log(`\n[SHUTDOWN] Received ${signal}. Shutting down gracefully...`);
+
+    // 1. Stop accepting new connections
+    server.close(() => {
+        console.log("[SHUTDOWN] Server closed — no new connections accepted.");
+    });
+
+    // 2. Write a final synchronous RDB snapshot
+    //    (sync is acceptable here — the process is about to exit)
+    forceSave(database.getAll());
+
+    // 3. Give in-flight async AOF appends ~200ms to flush, then exit
+    setTimeout(() => {
+        console.log("[SHUTDOWN] Clean exit.");
+        process.exit(0);
+    }, 200);
+}
+
+process.on("SIGINT",  () => gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+

@@ -2,6 +2,17 @@ const fs = require("fs");
 
 const rdb_file = "dump.rdb";
 
+// ─── Async throttled write state ─────────────────────────────────────────────
+// Ensures we never block the event loop and never queue more than one write.
+// If a save is already in progress, any further calls mark _dirty = true.
+// When the in-flight save finishes it checks _dirty and immediately starts
+// another save to capture the latest state. Under a burst of writes this
+// results in at most two fs.writeFile calls instead of thousands.
+
+let _dirty  = false;   // new writes arrived since the last save started
+let _saving = false;   // a fs.writeFile is currently in flight
+let _latest = null;    // reference to the database Map at schedule time
+
 function serializeEntry(entry) {
     if (entry == null) return null;
 
@@ -32,18 +43,61 @@ function serializeEntry(entry) {
     return { type: "string", value: String(entry.value ?? "") };
 }
 
-function save_Rdb(database) {
+// ─── Internal async write ────────────────────────────────────────────────────
+function _doSave() {
+    _saving = true;
+    _dirty  = false;
+
+    const snapshotObj = {};
+    for (const [key, entry] of _latest.entries()) {
+        snapshotObj[key] = serializeEntry(entry);
+    }
+
+    fs.writeFile(rdb_file, JSON.stringify(snapshotObj), (err) => {
+        _saving = false;
+        if (err) {
+            console.error("[RDB] Error saving snapshot:", err);
+        }
+        // If new writes arrived while we were saving, persist them now
+        if (_dirty) _doSave();
+    });
+}
+
+/**
+ * Schedule an async RDB snapshot.
+ * Safe to call after every write — debounced so it never piles up.
+ * @param {Map} database - the live in-memory database Map
+ */
+function scheduleSave(database) {
+    _latest = database;
+    _dirty  = true;
+    if (!_saving) _doSave();
+}
+
+/**
+ * Synchronous RDB save — only for graceful shutdown.
+ * Blocks intentionally: the process is about to exit anyway.
+ * @param {Map} database - the live in-memory database Map
+ */
+function forceSave(database) {
     try {
         const snapshotObj = {};
-        for (const [key, entry] of database.entries()) {
+        const db = database || _latest;
+        if (!db) return;
+        for (const [key, entry] of db.entries()) {
             snapshotObj[key] = serializeEntry(entry);
         }
-        const snapshot = JSON.stringify(snapshotObj);
-        fs.writeFileSync(rdb_file, snapshot);
-        console.log("snapshot taken successfully");
+        fs.writeFileSync(rdb_file, JSON.stringify(snapshotObj));
+        console.log("[RDB] Final snapshot saved on shutdown.");
     } catch (err) {
-        console.error("Error saving RDB:", err);
+        console.error("[RDB] Error saving final snapshot:", err);
     }
+}
+
+// Legacy alias — kept so any code that still calls save_Rdb() still works
+// but now goes through the async path instead of blocking.
+function save_Rdb(database) {
+    scheduleSave(database);
 }
 
 function load_Rdb(database) {
@@ -130,4 +184,4 @@ function loadRDBFromBuffer(buffer, database) {
     }
 }
 
-module.exports = { save_Rdb, load_Rdb, loadRDBFromBuffer };
+module.exports = { save_Rdb, scheduleSave, forceSave, load_Rdb, loadRDBFromBuffer };

@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Redis Clone – Workflow Visualiser</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2e3147;
+      --accent: #e74c3c;
+      --accent2: #3498db;
+      --accent3: #2ecc71;
+      --accent4: #f39c12;
+      --text: #e8eaf0;
+      --muted: #8891a8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      padding: 24px;
+    }
+    h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: var(--accent);
+      margin-bottom: 4px;
+      letter-spacing: -0.5px;
+    }
+    .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 28px; }
+
+    /* Tab nav */
+    .tabs { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
+    .tab {
+      padding: 8px 18px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+    .tab:hover { border-color: var(--accent2); color: var(--text); }
+    .tab.active { background: var(--accent2); border-color: var(--accent2); color: #fff; }
+
+    /* Panel */
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+    .card h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--accent2);
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .card h2 .icon { font-size: 1.1rem; }
+
+    /* Mermaid override */
+    .mermaid { overflow-x: auto; }
+    .mermaid svg { max-width: 100%; height: auto !important; }
+
+    /* Legend */
+    .legend {
+      display: flex; flex-wrap: wrap; gap: 12px;
+      margin-top: 16px;
+    }
+    .legend-item {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 0.78rem; color: var(--muted);
+    }
+    .dot {
+      width: 10px; height: 10px;
+      border-radius: 2px;
+    }
+
+    /* Module grid */
+    .module-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 14px;
+    }
+    .module-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+    }
+    .module-card h3 {
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .module-card p { font-size: 0.78rem; color: var(--muted); line-height: 1.5; }
+    .module-card .path {
+      font-size: 0.72rem;
+      color: var(--accent4);
+      font-family: monospace;
+      margin-bottom: 6px;
+    }
+    .tag {
+      display: inline-block;
+      font-size: 0.68rem;
+      padding: 1px 7px;
+      border-radius: 10px;
+      margin-right: 4px;
+      margin-top: 4px;
+    }
+    .tag-core    { background: #1a3a2a; color: #2ecc71; }
+    .tag-persist { background: #2a2010; color: #f39c12; }
+    .tag-proto   { background: #1a2a3a; color: #3498db; }
+    .tag-repl    { background: #2a1a2a; color: #9b59b6; }
+    .tag-msg     { background: #2a1a1a; color: #e74c3c; }
+  </style>
+</head>
+<body>
+
+<h1>Redis Clone — Workflow Visualiser</h1>
+<p class="subtitle">Interactive diagrams of the server architecture, data flow, and subsystems</p>
+
+<div class="tabs">
+  <button class="tab active" onclick="showTab('overview')">System Overview</button>
+  <button class="tab" onclick="showTab('request')">Request Lifecycle</button>
+  <button class="tab" onclick="showTab('replication')">Replication</button>
+  <button class="tab" onclick="showTab('pubsub')">Pub / Sub</button>
+  <button class="tab" onclick="showTab('persistence')">Persistence</button>
+  <button class="tab" onclick="showTab('transaction')">Transactions</button>
+  <button class="tab" onclick="showTab('modules')">Module Map</button>
+</div>
+
+<!-- ───────────── OVERVIEW ───────────── -->
+<div id="tab-overview" class="panel active">
+  <div class="card">
+    <h2><span class="icon">🗺️</span> Full System Architecture</h2>
+    <div class="mermaid">
+graph TB
+    subgraph CLIENTS["Clients"]
+        C1([Client 1])
+        C2([Client 2])
+        CN([Client N])
+    end
+
+    subgraph SERVER["server.js — TCP Server :6379"]
+        ACCEPT[Accept Connection]
+        PARSE[Protocol Detection\nRESP / Inline]
+        RESP_P[RESPParser]
+        PROC[processCommand]
+        TX{Transaction\nActive?}
+        QUEUE[Queue Command\nsocket.tx]
+        HC[handleCommand\ncommand.js]
+    end
+
+    subgraph STORAGE["Storage Layer"]
+        DB[(database.js\nIn-Memory Map)]
+        EXP[expiry.js\nTTL Store]
+    end
+
+    subgraph PERSISTENCE["Persistence"]
+        AOF[aof.js\ndatabase.aof]
+        RDB[rdb.js\ndump.rdb]
+    end
+
+    subgraph MESSAGING["Messaging"]
+        PS[pubsub.js\nChannel Map]
+    end
+
+    subgraph REPLICATION["Replication"]
+        MASTER[master.js\nBacklog + Replicas]
+        REPLICA[replica.js\nSync State Machine]
+    end
+
+    subgraph PROTOCOL["Protocol"]
+        RESP_ENC[resp.js\nRESP Encoder]
+    end
+
+    R1([Replica 1])
+    R2([Replica 2])
+
+    C1 & C2 & CN -->|TCP| ACCEPT
+    ACCEPT --> PARSE
+    PARSE -->|RESP| RESP_P --> PROC
+    PARSE -->|Inline| PROC
+    PROC --> TX
+    TX -->|Yes| QUEUE
+    TX -->|No| HC
+    HC --> DB & EXP
+    HC --> AOF & RDB
+    HC --> PS
+    HC -->|Write cmd| MASTER
+    MASTER -->|Stream RESP| R1 & R2
+    REPLICA -->|PSYNC handshake| MASTER
+    HC --> RESP_ENC -->|Response| CLIENTS
+
+    style CLIENTS   fill:#1a1d27,stroke:#3498db,color:#e8eaf0
+    style SERVER    fill:#1a1d27,stroke:#e74c3c,color:#e8eaf0
+    style STORAGE   fill:#1a1d27,stroke:#2ecc71,color:#e8eaf0
+    style PERSISTENCE fill:#1a1d27,stroke:#f39c12,color:#e8eaf0
+    style MESSAGING fill:#1a1d27,stroke:#e74c3c,color:#e8eaf0
+    style REPLICATION fill:#1a1d27,stroke:#9b59b6,color:#e8eaf0
+    style PROTOCOL  fill:#1a1d27,stroke:#3498db,color:#e8eaf0
+    </div>
+  </div>
+</div>
+
+<!-- ───────────── REQUEST LIFECYCLE ───────────── -->
+<div id="tab-request" class="panel">
+  <div class="card">
+    <h2><span class="icon">⚡</span> Request Lifecycle — GET / SET</h2>
+    <div class="mermaid">
+sequenceDiagram
+    participant C  as Client
+    participant S  as server.js
+    participant P  as RESPParser
+    participant HC as command.js
+    participant DB as database.js
+    participant EX as expiry.js
+    participant A  as aof.js
+    participant R  as rdb.js
+    participant M  as master.js
+
+    C  ->> S  : TCP chunk (RESP bytes)
+    S  ->> P  : parser.push(chunk)
+    P  -->> S : onMessage(args[])
+    S  ->> S  : processCommand(args, socket)
+
+    alt Replica mode + write command
+        S  -->> C : -READONLY error
+    else Normal command
+        S  ->> HC : handleCommand(args, socket)
+        alt GET key
+            HC ->> EX : isExpired(key)
+            EX -->> HC : false / true
+            alt expired
+                HC ->> DB : deleteKey(key)
+                HC -->> C : $-1 (nil)
+            else not expired
+                HC ->> DB : getString(key)
+                DB -->> HC : value
+                HC -->> C : $N\r\nvalue
+            end
+        else SET key value
+            HC ->> DB : setString(key, value)
+            HC ->> A  : appendToAOF("SET key value")
+            HC ->> R  : save_Rdb(all)
+            HC -->> C : +OK
+            HC ->> M  : propagateToReplicas(args)
+        end
+    end
+    </div>
+  </div>
+</div>
+
+<!-- ───────────── REPLICATION ───────────── -->
+<div id="tab-replication" class="panel">
+  <div class="card">
+    <h2><span class="icon">🔁</span> Master → Replica Replication Handshake</h2>
+    <div class="mermaid">
+sequenceDiagram
+    participant RP as replica.js
+    participant M  as master.js (server.js)
+
+    Note over RP: State: WAIT_WELCOME
+    RP ->> M : PING
+    M -->> RP : +PONG
+    Note over RP: State: REPLCONF_PORT
+    RP ->> M : REPLCONF listening-port &lt;port&gt;
+    M -->> RP : +OK
+    Note over RP: State: REPLCONF_CAPA
+    RP ->> M : REPLCONF capa psync2
+    M -->> RP : +OK
+    Note over RP: State: WAIT_SYNC_RESPONSE
+
+    alt First sync (no saved replid)
+        RP ->> M : PSYNC ? -1
+        M -->> RP : +FULLRESYNC &lt;replid&gt; &lt;offset&gt;
+        M -->> RP : $&lt;size&gt;\r\n&lt;RDB bytes&gt;
+        RP ->> RP : loadRDBFromBuffer(data)
+        Note over RP: State: STREAMING
+    else Reconnect (saved replid + offset)
+        RP ->> M : PSYNC &lt;saved_replid&gt; &lt;saved_offset&gt;
+        alt offset in backlog
+            M -->> RP : +CONTINUE &lt;replid&gt;
+            M -->> RP : &lt;backlog bytes from offset&gt;
+            Note over RP: Partial sync — no RDB transfer!
+        else offset too old
+            M -->> RP : +FULLRESYNC &lt;replid&gt; 0
+            M -->> RP : $&lt;size&gt;\r\n&lt;RDB bytes&gt;
+        end
+        Note over RP: State: STREAMING
+    end
+
+    loop Every 1 second (heartbeat)
+        RP ->> M : REPLCONF ACK &lt;replicaOffset&gt;
+        M  ->> M : update replica.offset
+    end
+
+    loop Write commands from clients
+        M -->> RP : &lt;RESP-encoded command&gt;
+        RP ->> RP : handleCommand(args) — apply to replica DB
+    end
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="icon">📊</span> Replication State Machine (Replica)</h2>
+    <div class="mermaid">
+stateDiagram-v2
+    [*] --> WAIT_WELCOME : TCP connect to master
+    WAIT_WELCOME --> REPLCONF_PORT : received +PONG
+    REPLCONF_PORT --> REPLCONF_CAPA : sent REPLCONF listening-port
+    REPLCONF_CAPA --> WAIT_SYNC_RESPONSE : sent REPLCONF capa psync2
+    WAIT_SYNC_RESPONSE --> RECEIVING_RDB : FULLRESYNC received
+    WAIT_SYNC_RESPONSE --> STREAMING : CONTINUE received
+    RECEIVING_RDB --> STREAMING : RDB fully received & loaded
+    STREAMING --> WAIT_WELCOME : connection lost (reconnect after 3s)
+    </div>
+  </div>
+</div>
+
+<!-- ───────────── PUB/SUB ───────────── -->
+<div id="tab-pubsub" class="panel">
+  <div class="card">
+    <h2><span class="icon">📢</span> Pub / Sub Flow</h2>
+    <div class="mermaid">
+sequenceDiagram
+    participant S1 as Subscriber 1
+    participant S2 as Subscriber 2
+    participant SRV as server.js + pubsub.js
+    participant PUB as Publisher
+
+    S1 ->> SRV : SUBSCRIBE news sports
+    SRV -->> S1 : *3 subscribe news 1
+    SRV -->> S1 : *3 subscribe sports 2
+
+    S2 ->> SRV : SUBSCRIBE news
+    SRV -->> S2 : *3 subscribe news 1
+
+    Note over SRV: channels = { news: {S1,S2}, sports: {S1} }
+
+    PUB ->> SRV : PUBLISH news "Hello World"
+    SRV -->> S1 : *3 message news "Hello World"
+    SRV -->> S2 : *3 message news "Hello World"
+    SRV -->> PUB : :2  (subscriber count)
+
+    PUB ->> SRV : PUBLISH sports "Goal!"
+    SRV -->> S1 : *3 message sports "Goal!"
+    SRV -->> PUB : :1
+
+    S1 ->> SRV : UNSUBSCRIBE news
+    SRV -->> S1 : *3 unsubscribe news 1
+    Note over SRV: channels.news = {S2}
+    </div>
+  </div>
+</div>
+
+<!-- ───────────── PERSISTENCE ───────────── -->
+<div id="tab-persistence" class="panel">
+  <div class="card">
+    <h2><span class="icon">💾</span> Persistence — AOF + RDB</h2>
+    <div class="mermaid">
+flowchart LR
+    subgraph WRITE["Write Command (SET / DEL / LPUSH …)"]
+        CMD[Execute Command\nUpdate in-memory Map]
+    end
+
+    subgraph AOF_FLOW["AOF — Append-Only File"]
+        AOF_APPEND["appendToAOF(cmd)\nfs.appendFile()"]
+        AOF_FILE[("database.aof\nSET key val\nDEL key\n…")]
+    end
+
+    subgraph RDB_FLOW["RDB — Snapshot"]
+        RDB_SAVE["save_Rdb(database.getAll())\nJSON.stringify typed entries"]
+        RDB_FILE[("dump.rdb\nJSON snapshot")]
+    end
+
+    subgraph STARTUP["Startup Recovery"]
+        S1[load_Rdb] --> S2[loadRDBFromBuffer\nrestore typed Map]
+        S2 --> S3[replayAOF\nre-execute each line]
+        S3 --> READY([Server Ready])
+    end
+
+    CMD --> AOF_APPEND --> AOF_FILE
+    CMD --> RDB_SAVE  --> RDB_FILE
+
+    AOF_FILE --> S3
+    RDB_FILE --> S1
+
+    style WRITE fill:#1a2a1a,stroke:#2ecc71,color:#e8eaf0
+    style AOF_FLOW fill:#2a2010,stroke:#f39c12,color:#e8eaf0
+    style RDB_FLOW fill:#1a1a2a,stroke:#3498db,color:#e8eaf0
+    style STARTUP fill:#2a1a1a,stroke:#e74c3c,color:#e8eaf0
+    </div>
+  </div>
+</div>
+
+<!-- ───────────── TRANSACTIONS ───────────── -->
+<div id="tab-transaction" class="panel">
+  <div class="card">
+    <h2><span class="icon">🔒</span> MULTI / EXEC Transaction Flow</h2>
+    <div class="mermaid">
+sequenceDiagram
+    participant C as Client
+    participant S as server.js
+    participant HC as command.js
+    participant DB as database.js
+
+    C ->> S : MULTI
+    S ->> S : socket.tx = { active: true, queue: [] }
+    S -->> C : +OK
+
+    loop Commands inside transaction
+        C ->> S : SET foo bar
+        S ->> S : socket.tx.queue.push(["SET","foo","bar"])
+        S -->> C : +QUEUED
+
+        C ->> S : INCR counter
+        S ->> S : socket.tx.queue.push(["INCR","counter"])
+        S -->> C : +QUEUED
+    end
+
+    C ->> S : EXEC
+    S ->> S : socket.tx.active = false
+    loop For each queued command
+        S ->> HC : handleCommand(args, socket)
+        HC ->> DB : apply operation
+        DB -->> HC : result
+        S ->> S : results.push(resp)
+        S ->> S : if write → propagateToReplicas()
+    end
+    S -->> C : *2\r\n+OK\r\n:1\r\n  (array of results)
+
+    Note over C,S: DISCARD path
+    C ->> S : DISCARD
+    S ->> S : socket.tx = { active: false, queue: [] }
+    S -->> C : +OK
+    </div>
+  </div>
+</div>
+
+<!-- ───────────── MODULE MAP ───────────── -->
+<div id="tab-modules" class="panel">
+  <div class="card">
+    <h2><span class="icon">📦</span> Module Responsibilities</h2>
+    <div class="module-grid">
+
+      <div class="module-card">
+        <h3 style="color:#e74c3c">server.js</h3>
+        <div class="path">redis_clone/server.js</div>
+        <p>TCP server entry point. Accepts connections, detects protocol, dispatches commands, manages transaction state, orchestrates startup.</p>
+        <span class="tag tag-core">Core</span>
+      </div>
+
+      <div class="module-card">
+        <h3 style="color:#3498db">RESPParser.js</h3>
+        <div class="path">redis_clone/RESPParser.js</div>
+        <p>Stateful RESP protocol parser. Buffers partial TCP chunks and emits complete command arrays.</p>
+        <span class="tag tag-proto">Protocol</span>
+      </div>
+
+      <div class="module-card">
+        <h3 style="color:#3498db">protocol/resp.js</h3>
+        <div class="path">redis_clone/protocol/resp.js</div>
+        <p>RESP encoding helpers: respSimpleString, respError, respBulk, respArray, respInteger, toRESP.</p>
+        <span class="tag tag-proto">Protocol</span>
+      </div>
+
+      <div class="module-card">
+        <h3 style="color:#e74c3c">commands/command.js</h3>
+        <div class="path">redis_clone/commands/command.js</div>
+        <p>Implements all Redis commands: String, List, Hash, Pub/Sub, System. Routes to storage and messaging layers.</p>
+        <span class="tag tag-core">Core</span>
+      </div>
+
+      <div class="module-card">
+        <h3 style="color:#2ecc71">storage/database.js</h3>
+        <div class="path">redis_clone/storage/database.js</div>
+        <p>In-memory Map with typed entries (string / list / hash). Provides get/set/delete/getAll APIs.</p>
+        <span class="tag tag-core">Storage</span>
+      </div>
+
+      <div class="module-card">
+        <h3 style="color:#2ecc71">storage/expiry.js</h3>
+        <div class="path">redis_clone/storage/expiry.js</div>
+        <p>TTL management. Stores expiry timestamps; lazy deletion triggered on key access.</p>
+        <span class="tag tag-core">Storage</span>
+      </div>
+
+      <div class="module-card">
+        <h3 style="color:#f39c12">persistence/aof.js</h3>
+        <div class="path">redis_clone/persistence/aof.js</div>
+        <p>Append-Only File logging. Every write command is appended; replayed on startup to restore incremental state.</p>
+        <span class="tag tag-persist">Persistence</span>
+      </div>
+
+      <div class="module-card">
+        <h3 style="color:#f39c12">persistence/rdb.js</h3>
+        <div class="path">redis_clone/persistence/rdb.js</div>
+        <p>JSON-based RDB snapshots of the full database. Saved after every write; loaded on startup and during replica full sync.</p>
+        <span class="tag tag-persist">Persistence</span>
+      </div>
+
+      <div class="module-card">
+        <h3 style="color:#9b59b6">replication/master.js</h3>
+        <div class="path">redis_clone/replication/master.js</div>
+        <p>Master replication: tracks replica sockets, manages 1 MB replication backlog, handles REPLCONF/PSYNC, propagates write commands.</p>
+        <span class="tag tag-repl">Replication</span>
+      </div>
+
+      <div class="module-card">
+        <h3 style="color:#9b59b6">replication/replica.js</h3>
+        <div class="path">redis_clone/replication/replica.js</div>
+        <p>Replica state machine: PING → REPLCONF → PSYNC → stream. Auto-reconnects after 3 s. Sends ACK heartbeat every 1 s.</p>
+        <span class="tag tag-repl">Replication</span>
+      </div>
+
+      <div class="module-card">
+        <h3 style="color:#e74c3c">messaging/pubsub.js</h3>
+        <div class="path">redis_clone/messaging/pubsub.js</div>
+        <p>Pub/Sub engine. channel → Set&lt;socket&gt; map. Handles SUBSCRIBE, UNSUBSCRIBE, PUBLISH, and cleanup on socket close.</p>
+        <span class="tag tag-msg">Messaging</span>
+      </div>
+
+      <div class="module-card">
+        <h3 style="color:#8891a8">client.js</h3>
+        <div class="path">redis_clone/client.js</div>
+        <p>Simple CLI client. Connects to server, sends commands from stdin, receives and prints responses.</p>
+        <span class="tag tag-core">CLI</span>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      background: '#1a1d27',
+      primaryColor: '#2e3147',
+      primaryTextColor: '#e8eaf0',
+      primaryBorderColor: '#3498db',
+      lineColor: '#8891a8',
+      secondaryColor: '#1a1d27',
+      tertiaryColor: '#1a1d27',
+      edgeLabelBackground: '#1a1d27',
+      clusterBkg: '#1a1d27',
+      clusterBorder: '#2e3147',
+    },
+    flowchart: { curve: 'basis' },
+    sequence: { actorMargin: 60, messageMargin: 30 },
+  });
+
+  function showTab(name) {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    event.target.classList.add('active');
+  }
+</script>
+</body>
+</html>
