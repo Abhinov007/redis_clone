@@ -35,6 +35,24 @@ function clearEntryExpiry(key) {
 }
 
 /**
+ * Set expiry from an absolute deadline in milliseconds from now.
+ * Used internally when transferring a TTL (e.g. RENAME).
+ */
+function setExpiryMs(key, ms) {
+    expiryStore.set(key, Date.now() + ms);
+}
+
+/**
+ * Return the remaining TTL in milliseconds, or null if no expiry is set.
+ * Does NOT evict the key — call isExpired() first if you need lazy eviction.
+ */
+function getRemainingMs(key) {
+    if (!expiryStore.has(key)) return null;
+    const remaining = expiryStore.get(key) - Date.now();
+    return remaining > 0 ? remaining : 0;
+}
+
+/**
  * Start the active expiry sweep interval.
  * Without this, keys with TTLs that are never read stay in memory forever
  * (lazy-only expiry). This sweep proactively frees them in the background.
@@ -75,4 +93,4 @@ function startExpirySweep() {
     return handle;
 }
 
-module.exports = { setExpiry, isExpired, clearExpiry, clearEntryExpiry, startExpirySweep };
+module.exports = { setExpiry, isExpired, clearExpiry, clearEntryExpiry, setExpiryMs, getRemainingMs, startExpirySweep };

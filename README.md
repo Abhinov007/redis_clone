@@ -16,16 +16,17 @@ Type Redis commands and watch the internal database, expiry store, AOF log, RDB 
 
 ### Core
 - **RESP Protocol** — full Redis Serialization Protocol parser with incremental TCP chunk handling
-- **3 data types** — Strings, Lists, Hashes
-- **Key expiry** — `SET key value EX seconds` with lazy expiry on access
-- **PING / DEL / FLUSHALL**
+- **4 data types** — Strings, Lists, Hashes, Sets
+- **Key expiry** — `SET key value EX seconds`, lazy eviction on read + active probabilistic sweep every 100 ms
+- **60+ commands** across all data types
 
 ### Persistence (dual-layer, same as real Redis)
-- **AOF** — every write command appended to `database.aof`; replayed line-by-line on startup
-- **RDB** — full JSON snapshot written to `dump.rdb` after every write; loaded first on startup
+- **AOF** — every write appended to `database.aof`; replayed on startup via the live command handler (no duplicate parser)
+- **RDB** — debounced async JSON snapshot to `dump.rdb`; blocks only on graceful shutdown
+- **Priority rule** — AOF takes precedence over RDB on startup (matches Redis behaviour, prevents double-apply of mutations)
 
 ### Transactions
-- `MULTI` / `EXEC` / `DISCARD` — commands queued during a MULTI block and executed atomically on EXEC
+- `MULTI` / `EXEC` / `DISCARD` — commands queued and executed atomically; per-command error isolation inside `EXEC`
 
 ### Pub/Sub
 - `SUBSCRIBE` / `UNSUBSCRIBE` / `PUBLISH`
@@ -33,10 +34,15 @@ Type Redis commands and watch the internal database, expiry store, AOF log, RDB 
 
 ### Replication
 - Master generates a replication ID and maintains a 1 MB circular backlog
-- Full resync (sends RDB snapshot) and partial resync (`+CONTINUE` from backlog offset)
-- Replica 6-state handshake state machine with auto-reconnect and `REPLCONF ACK` heartbeats
+- Full resync (RDB snapshot) and partial resync (`+CONTINUE` from backlog offset)
+- Replica 6-state handshake with auto-reconnect and `REPLCONF ACK` heartbeats
 - Write commands propagated to all replicas in RESP format
 - Replica enforces read-only mode for client connections
+
+### Reliability
+- **Error boundary** — any unhandled exception inside a command returns `-ERR` to the client; server keeps running
+- **Graceful shutdown** — `SIGINT` / `SIGTERM` flush a final synchronous RDB snapshot before exit
+- **Active expiry sweep** — probabilistic Fisher-Yates sample, re-sweeps immediately when >25 % of sample expired
 
 ---
 
@@ -47,6 +53,15 @@ Type Redis commands and watch the internal database, expiry store, AOF log, RDB 
 |---|---|
 | `SET key value [EX seconds]` | `SET name Alice EX 60` |
 | `GET key` | `GET name` |
+| `MSET key value [key value …]` | `MSET k1 v1 k2 v2` |
+| `MGET key [key …]` | `MGET k1 k2 k3` |
+| `SETNX key value` | `SETNX lock 1` |
+| `STRLEN key` | `STRLEN name` |
+| `APPEND key value` | `APPEND log " entry"` |
+| `INCR key` | `INCR hits` |
+| `DECR key` | `DECR stock` |
+| `INCRBY key n` | `INCRBY score 10` |
+| `DECRBY key n` | `DECRBY score 5` |
 
 ### Lists
 | Command | Example |
@@ -57,6 +72,9 @@ Type Redis commands and watch the internal database, expiry store, AOF log, RDB 
 | `RPOP key` | `RPOP queue` |
 | `LLEN key` | `LLEN queue` |
 | `LRANGE key start stop` | `LRANGE queue 0 -1` |
+| `LINDEX key index` | `LINDEX queue 0` |
+| `LSET key index value` | `LSET queue 0 newval` |
+| `LTRIM key start stop` | `LTRIM queue 0 99` |
 
 ### Hashes
 | Command | Example |
@@ -68,12 +86,27 @@ Type Redis commands and watch the internal database, expiry store, AOF log, RDB 
 | `HLEN key` | `HLEN user:1` |
 | `HEXISTS key field` | `HEXISTS user:1 name` |
 
+### Sets
+| Command | Example |
+|---|---|
+| `SADD key member [member …]` | `SADD tags redis nosql` |
+| `SREM key member [member …]` | `SREM tags nosql` |
+| `SMEMBERS key` | `SMEMBERS tags` |
+| `SCARD key` | `SCARD tags` |
+| `SISMEMBER key member` | `SISMEMBER tags redis` |
+| `SUNION key [key …]` | `SUNION s1 s2` |
+| `SINTER key [key …]` | `SINTER s1 s2` |
+| `SDIFF key [key …]` | `SDIFF s1 s2` |
+
 ### Key Management
 | Command | Example |
 |---|---|
+| `EXISTS key [key …]` | `EXISTS name age` |
+| `TYPE key` | `TYPE mylist` |
+| `RENAME key newkey` | `RENAME tmp result` |
+| `KEYS pattern` | `KEYS user:*` |
 | `DEL key` | `DEL name` |
 | `FLUSHALL` | `FLUSHALL` |
-| `PING [message]` | `PING` |
 
 ### Transactions
 | Command | Description |
@@ -89,42 +122,62 @@ Type Redis commands and watch the internal database, expiry store, AOF log, RDB 
 | `UNSUBSCRIBE [channel …]` | `UNSUBSCRIBE news` |
 | `PUBLISH channel message` | `PUBLISH news "Hello World"` |
 
+### Server
+| Command | Description |
+|---|---|
+| `PING` | Returns `PONG` |
+| `END` | Close the current connection |
+
 ---
 
 ## Project Structure
 
 ```
 redis_clone/
-├── redis_clone/                      # Node.js Redis server
-│   ├── server.js                     # TCP server entry point (port 6379)
-│   ├── client.js                     # Interactive CLI client
-│   ├── RESPParser.js                 # Incremental RESP protocol parser
-│   ├── commands/
-│   │   └── command.js                # All command handlers
-│   ├── storage/
-│   │   ├── database.js               # In-memory Map store
-│   │   └── expiry.js                 # TTL / lazy expiry management
-│   ├── persistence/
-│   │   ├── aof.js                    # Append-Only File
-│   │   └── rdb.js                    # JSON snapshot (RDB-style)
-│   ├── protocol/
-│   │   └── resp.js                   # RESP encoding helpers
-│   ├── messaging/
-│   │   └── pubsub.js                 # Pub/Sub engine
-│   ├── replication/
-│   │   ├── master.js                 # Master replication state machine
-│   │   └── replica.js                # Replica sync + streaming state machine
-│   ├── tests/
-│   │   ├── TestParser.js             # RESP parser smoke test
-│   │   ├── clientTest.js             # SET/GET integration test
-│   │   └── replicationTest.js        # 18-test replication suite
-│   ├── workflow.html                 # Interactive architecture diagrams (Mermaid)
-│   ├── database.aof                  # Live AOF log
-│   └── dump.rdb                      # Live RDB snapshot
+├── server.js                     # TCP server entry point
+├── startup.js                    # Persistence loading + replica init
+├── RESPParser.js                 # Incremental RESP protocol parser
+├── client.js                     # Interactive CLI client
 │
-└── sandbox/                          # React interactive sandbox
+├── commands/
+│   └── command.js                # All 60+ command handlers
+│
+├── middleware/
+│   ├── transactions.js           # MULTI/EXEC/DISCARD + command queue
+│   └── replication.js            # Read-only guard, REPLCONF/PSYNC routing
+│
+├── storage/
+│   ├── database.js               # In-memory Map store (string/list/hash/set)
+│   └── expiry.js                 # TTL store, lazy + active sweep eviction
+│
+├── persistence/
+│   ├── aof.js                    # Append-Only File (dependency-injected replay)
+│   └── rdb.js                    # Debounced async JSON snapshot
+│
+├── protocol/
+│   └── resp.js                   # RESP encoding helpers
+│
+├── messaging/
+│   └── pubsub.js                 # Pub/Sub channel → socket mapping
+│
+├── replication/
+│   ├── master.js                 # Replication ID, backlog, propagation
+│   └── replica.js                # 6-state handshake + streaming state machine
+│
+├── tests/
+│   ├── phase1Test.js             # Stability: async RDB, error boundary, shutdown (11 tests)
+│   ├── phase2Test.js             # Correctness: expiry sweep, AOF replay, INCR/DECR (14 tests)
+│   ├── phase3Test.js             # Completeness: key-space, strings, lists, sets (55 tests)
+│   ├── loadTest.js               # Throughput / latency benchmark with histogram
+│   ├── TestParser.js             # RESP parser smoke test
+│   ├── clientTest.js             # SET/GET integration test
+│   └── replicationTest.js        # Replication suite (18 tests)
+│
+├── workflow.html                 # Interactive Mermaid architecture diagrams
+│
+└── sandbox/                      # React + Vite interactive browser sandbox
     ├── src/
-    │   ├── engine/                   # Browser simulation of server internals
+    │   ├── engine/               # Browser simulation of server internals
     │   │   ├── database.js
     │   │   ├── expiry.js
     │   │   ├── commands.js
@@ -132,14 +185,13 @@ redis_clone/
     │   │   ├── rdb.js
     │   │   └── pubsub.js
     │   ├── components/
-    │   │   ├── Terminal.jsx          # REPL with command history
+    │   │   ├── Terminal.jsx      # REPL with command history
     │   │   ├── StorageInspector.jsx  # 5-tab storage visualiser
-    │   │   ├── KeyCard.jsx           # Per-key card with live TTL countdown
-    │   │   └── ResponseLine.jsx      # Color-coded RESP response renderer
+    │   │   ├── KeyCard.jsx       # Per-key card with live TTL countdown
+    │   │   └── ResponseLine.jsx  # Colour-coded RESP response renderer
     │   ├── hooks/
-    │   │   └── useRedisEngine.js     # Central state hook
+    │   │   └── useRedisEngine.js # Central state hook (useRef engine, useState snapshots)
     │   └── App.jsx
-    ├── index.html
     ├── vite.config.js
     └── package.json
 ```
@@ -154,8 +206,6 @@ redis_clone/
 ### Run the Server
 
 ```bash
-cd redis_clone
-npm install
 node server.js
 ```
 
@@ -169,35 +219,31 @@ node server.js --port 6380
 node server.js --port 6380 --replicaof localhost 6379
 ```
 
-### Connect with the CLI Client
+### Connect
 
 ```bash
+# Built-in CLI client
 node client.js
-```
 
-### Connect with netcat
-
-```bash
-echo -e "PING\r\n" | nc localhost 6379
-echo -e "SET name Alice\r\n" | nc localhost 6379
-echo -e "GET name\r\n" | nc localhost 6379
+# netcat (inline commands)
+echo -e "*1\r\n\$4\r\nPING\r\n" | nc localhost 6379
 ```
 
 ---
 
 ## Replication Setup
 
-**Terminal 1 — Master (port 6379)**
+**Terminal 1 — Master**
 ```bash
 node server.js
 ```
 
-**Terminal 2 — Replica (port 6380)**
+**Terminal 2 — Replica**
 ```bash
 node server.js --port 6380 --replicaof localhost 6379
 ```
 
-Writes on the master are automatically propagated to the replica. The replica performs a full RDB sync on first connect and attempts a partial resync on reconnect.
+Writes on the master propagate automatically. The replica does a full RDB sync on first connect and a partial resync on reconnect using the replication backlog.
 
 ---
 
@@ -205,36 +251,57 @@ Writes on the master are automatically propagated to the replica. The replica pe
 
 **Terminal 1 — Subscriber**
 ```bash
-echo -e "SUBSCRIBE news\r\n" | nc localhost 6379
+node client.js   # then type: SUBSCRIBE news
 ```
 
 **Terminal 2 — Publisher**
 ```bash
-echo -e "PUBLISH news 'Hello World'\r\n" | nc localhost 6379
+node client.js   # then type: PUBLISH news "Hello World"
 ```
 
 ---
 
 ## Running Tests
 
+Each suite is self-contained — it spawns its own server instance(s) on isolated ports and cleans up after itself.
+
 ```bash
-cd redis_clone
+# Stability (async RDB, error boundary, graceful shutdown)
+node tests/phase1Test.js
 
-# RESP parser smoke test
-node tests/TestParser.js
+# Correctness (active expiry, AOF replay across all types, INCR/DECR)
+node tests/phase2Test.js
 
-# SET/GET integration test (requires server running on 6379)
-node tests/clientTest.js
+# Completeness (60+ commands: key-space, strings, lists, sets)
+node tests/phase3Test.js
 
-# Full replication suite — 18 tests (requires server running)
-node tests/replicationTest.js
+# Performance benchmark (throughput, p50/p95/p99 latency, histogram)
+node tests/loadTest.js [clients] [requestsPerClient] [set|get|mix|pipeline]
+```
+
+Run all suites in sequence:
+```bash
+node tests/phase1Test.js && node tests/phase2Test.js && node tests/phase3Test.js
+```
+
+### Load test modes
+
+| Mode | Description |
+|---|---|
+| `mix` (default) | Alternating SET and GET |
+| `set` | SET only |
+| `get` | GET only (seed with `set` first) |
+| `pipeline` | 16 commands per batch |
+
+```bash
+node tests/loadTest.js 100 500 mix
 ```
 
 ---
 
 ## Interactive Sandbox
 
-The `sandbox/` directory is a React + Vite app that simulates the server entirely in the browser. No server needed.
+The `sandbox/` directory is a React + Vite app that simulates the server entirely in the browser. No server or Node.js needed.
 
 ```bash
 cd sandbox
@@ -246,8 +313,8 @@ Open **http://localhost:5173** to explore:
 
 | Tab | What it shows |
 |---|---|
-| **Database** | Live key cards with type badges (string / list / hash), flashes on write |
-| **Expiry** | Live TTL countdown bars for keys set with `EX` |
+| **Database** | Live key cards with type badges (string / list / hash / set), flashes on write |
+| **Expiry** | Live TTL countdown bars for keys with `EX` |
 | **AOF Log** | Append-only log updating after every write |
 | **RDB Snapshot** | Full JSON snapshot regenerated after every write |
 | **Pub/Sub** | Active channels and subscriber counts |
@@ -256,15 +323,15 @@ Open **http://localhost:5173** to explore:
 
 ## Architecture
 
-Open `redis_clone/workflow.html` in a browser for interactive Mermaid diagrams covering:
+Open `workflow.html` in a browser for interactive Mermaid diagrams covering:
 
 - Full system overview
-- Request lifecycle (GET/SET flow through parser → command → DB → AOF/RDB → replication)
-- Replication handshake & replica state machine
+- Request lifecycle (GET/SET → parser → middleware → command handler → AOF/RDB → replication)
+- Replication handshake and replica state machine
 - Pub/Sub message flow
-- Persistence (AOF + RDB) write and recovery paths
+- Persistence write and recovery paths (AOF priority rule)
 - MULTI/EXEC transaction flow
-- Module map
+- Module dependency map
 
 ---
 

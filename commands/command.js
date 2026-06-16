@@ -18,6 +18,35 @@ function parseInteger(value) {
     return n;
 }
 
+/**
+ * Convert a Redis glob pattern to a RegExp.
+ * Supports: * (any chars), ? (one char), [abc] / [a-z] (character classes).
+ *
+ * @param {string} pattern
+ * @returns {RegExp}
+ *
+ * @example
+ * globToRegex("h?llo").test("hello") // true
+ * globToRegex("h*").test("helloworld") // true
+ * globToRegex("h[ae]llo").test("hallo") // true
+ */
+function globToRegex(pattern) {
+    let regStr = "^";
+    for (let i = 0; i < pattern.length; i++) {
+        const c = pattern[i];
+        if (c === "*")       regStr += ".*";
+        else if (c === "?")  regStr += ".";
+        else if (c === "[")  {
+            // Pass character class through verbatim until closing ]
+            const end = pattern.indexOf("]", i);
+            if (end === -1) { regStr += "\\["; }
+            else { regStr += pattern.slice(i, end + 1); i = end; }
+        }
+        else regStr += c.replace(/[.+^${}()|\\]/g, "\\$&");
+    }
+    return new RegExp(regStr + "$");
+}
+
 function handleMulti(socket) {
     if (socket.tx.active) {
         return respError("ERR MULTI calls can not be nested");
@@ -435,6 +464,312 @@ function handleCoreCommand(args, socket, opts = {}) {
         }
 
         return respSimpleString("OK");
+    }
+
+    // =========================================================================
+    // Fix #9 — Key-space commands
+    // =========================================================================
+
+    if (command === "EXISTS") {
+        if (args.length < 2) return wrongArity("EXISTS");
+        let count = 0;
+        for (let i = 1; i < args.length; i++) {
+            const k = args[i];
+            if (!expiry.isExpired(k) && database.getEntry(k) !== null) count++;
+        }
+        return respInt(count);
+    }
+
+    if (command === "TYPE") {
+        if (args.length !== 2) return wrongArity("TYPE");
+        const key = args[1];
+        if (expiry.isExpired(key)) return respSimpleString("none");
+        return respSimpleString(database.getType(key));
+    }
+
+    if (command === "RENAME") {
+        if (args.length !== 3) return wrongArity("RENAME");
+        const src = args[1], dst = args[2];
+        if (expiry.isExpired(src)) {
+            expiry.clearEntryExpiry(src);
+            return respError("ERR no such key");
+        }
+        const entry = database.getEntry(src);
+        if (entry === null) return respError("ERR no such key");
+
+        database.setEntry(dst, entry);
+        database.deleteKey(src);
+
+        // Transfer TTL if one exists
+        const srcTTL = expiry.getRemainingMs(src);
+        expiry.clearEntryExpiry(src);
+        if (srcTTL !== null) expiry.setExpiryMs(dst, srcTTL);
+
+        if (!replay) {
+            appendToAOF(args.join(" "));
+            scheduleSave(database.getAll());
+        }
+        return respSimpleString("OK");
+    }
+
+    if (command === "KEYS") {
+        if (args.length !== 2) return wrongArity("KEYS");
+        const pattern = args[1];
+        const regex   = globToRegex(pattern);
+        const matches = [];
+        for (const [k] of database.getAll()) {
+            if (!expiry.isExpired(k) && regex.test(k)) matches.push(k);
+        }
+        return respArrayOfBulks(matches);
+    }
+
+    // =========================================================================
+    // Fix #10 — String completeness
+    // =========================================================================
+
+    if (command === "MSET") {
+        if (args.length < 3 || (args.length - 1) % 2 !== 0) return wrongArity("MSET");
+        for (let i = 1; i < args.length; i += 2) {
+            database.setString(args[i], args[i + 1]);
+        }
+        if (!replay) {
+            appendToAOF(args.join(" "));
+            scheduleSave(database.getAll());
+        }
+        return respSimpleString("OK");
+    }
+
+    if (command === "MGET") {
+        if (args.length < 2) return wrongArity("MGET");
+        const out = [];
+        for (let i = 1; i < args.length; i++) {
+            const k = args[i];
+            if (expiry.isExpired(k)) { out.push(respBulk(null)); continue; }
+            const v = database.getString(k);
+            // v === undefined means wrong type → Redis returns nil for MGET (no error)
+            out.push(respBulk(v == null || v === undefined ? null : v));
+        }
+        return respArray(out);
+    }
+
+    if (command === "SETNX") {
+        if (args.length !== 3) return wrongArity("SETNX");
+        const key = args[1];
+        if (!expiry.isExpired(key) && database.getEntry(key) !== null) return respInt(0);
+        database.setString(key, args[2]);
+        if (!replay) {
+            appendToAOF(args.join(" "));
+            scheduleSave(database.getAll());
+        }
+        return respInt(1);
+    }
+
+    if (command === "STRLEN") {
+        if (args.length !== 2) return wrongArity("STRLEN");
+        const key = args[1];
+        if (expiry.isExpired(key)) return respInt(0);
+        const val = database.getString(key);
+        if (val === undefined) return respError(WRONGTYPE);
+        if (val === null) return respInt(0);
+        return respInt(val.length);
+    }
+
+    if (command === "APPEND") {
+        if (args.length !== 3) return wrongArity("APPEND");
+        const key = args[1];
+        if (expiry.isExpired(key)) expiry.clearEntryExpiry(key);
+        const existing = database.getString(key);
+        if (existing === undefined) return respError(WRONGTYPE);
+        const newVal = (existing === null ? "" : existing) + args[2];
+        database.setString(key, newVal);
+        if (!replay) {
+            appendToAOF(args.join(" "));
+            scheduleSave(database.getAll());
+        }
+        return respInt(newVal.length);
+    }
+
+    if (command === "INCRBY" || command === "DECRBY") {
+        if (args.length !== 3) return wrongArity(command);
+        const key = args[1];
+        const delta = parseInt(args[2], 10);
+        if (Number.isNaN(delta)) return respError("ERR value is not an integer or out of range");
+        if (expiry.isExpired(key)) expiry.clearEntryExpiry(key);
+        const existing = database.getString(key);
+        if (existing === undefined) return respError(WRONGTYPE);
+        const current = existing === null ? 0 : parseInt(existing, 10);
+        if (Number.isNaN(current)) return respError("ERR value is not an integer or out of range");
+        const next = command === "INCRBY" ? current + delta : current - delta;
+        database.setString(key, String(next));
+        if (!replay) {
+            appendToAOF(args.join(" "));
+            scheduleSave(database.getAll());
+        }
+        return respInt(next);
+    }
+
+    // =========================================================================
+    // Fix #11 — List completeness
+    // =========================================================================
+
+    if (command === "LINDEX") {
+        if (args.length !== 3) return wrongArity("LINDEX");
+        const key = args[1];
+        const idx = parseInteger(args[2]);
+        if (idx === null) return respError("ERR value is not an integer or out of range");
+        const list = database.getList(key);
+        if (list === undefined) return respError(WRONGTYPE);
+        if (list === null || list.length === 0) return respBulk(null);
+        const i = idx < 0 ? list.length + idx : idx;
+        return respBulk(i >= 0 && i < list.length ? list[i] : null);
+    }
+
+    if (command === "LSET") {
+        if (args.length !== 4) return wrongArity("LSET");
+        const key = args[1];
+        const idx = parseInteger(args[2]);
+        if (idx === null) return respError("ERR value is not an integer or out of range");
+        const list = database.getList(key);
+        if (list === undefined) return respError(WRONGTYPE);
+        if (list === null) return respError("ERR no such key");
+        const i = idx < 0 ? list.length + idx : idx;
+        if (i < 0 || i >= list.length) return respError("ERR index out of range");
+        list[i] = String(args[3]);
+        if (!replay) {
+            appendToAOF(args.join(" "));
+            scheduleSave(database.getAll());
+        }
+        return respSimpleString("OK");
+    }
+
+    if (command === "LTRIM") {
+        if (args.length !== 4) return wrongArity("LTRIM");
+        const key = args[1];
+        const startRaw = parseInteger(args[2]);
+        const stopRaw  = parseInteger(args[3]);
+        if (startRaw === null || stopRaw === null)
+            return respError("ERR value is not an integer or out of range");
+        const list = database.getList(key);
+        if (list === undefined) return respError(WRONGTYPE);
+        if (list !== null) {
+            const len   = list.length;
+            let start   = startRaw < 0 ? len + startRaw : startRaw;
+            let stop    = stopRaw  < 0 ? len + stopRaw  : stopRaw;
+            if (start < 0) start = 0;
+            if (stop >= len) stop = len - 1;
+            const trimmed = (start > stop) ? [] : list.slice(start, stop + 1);
+            list.length = 0;
+            list.push(...trimmed);
+            if (list.length === 0) database.deleteKey(key);
+        }
+        if (!replay) {
+            appendToAOF(args.join(" "));
+            scheduleSave(database.getAll());
+        }
+        return respSimpleString("OK");
+    }
+
+    // =========================================================================
+    // Fix #13 — Sets
+    // =========================================================================
+
+    if (command === "SADD") {
+        if (args.length < 3) return wrongArity("SADD");
+        const key = args[1];
+        const set = database.getOrCreateSet(key);
+        if (set === undefined) return respError(WRONGTYPE);
+        let added = 0;
+        for (let i = 2; i < args.length; i++) {
+            const m = String(args[i]);
+            if (!set.has(m)) { set.add(m); added++; }
+        }
+        if (!replay) {
+            appendToAOF(args.join(" "));
+            scheduleSave(database.getAll());
+        }
+        return respInt(added);
+    }
+
+    if (command === "SREM") {
+        if (args.length < 3) return wrongArity("SREM");
+        const key = args[1];
+        const set = database.getSet(key);
+        if (set === undefined) return respError(WRONGTYPE);
+        if (set === null) return respInt(0);
+        let removed = 0;
+        for (let i = 2; i < args.length; i++) {
+            if (set.delete(String(args[i]))) removed++;
+        }
+        if (set.size === 0) database.deleteKey(key);
+        if (removed > 0 && !replay) {
+            appendToAOF(args.join(" "));
+            scheduleSave(database.getAll());
+        }
+        return respInt(removed);
+    }
+
+    if (command === "SMEMBERS") {
+        if (args.length !== 2) return wrongArity("SMEMBERS");
+        const key = args[1];
+        const set = database.getSet(key);
+        if (set === undefined) return respError(WRONGTYPE);
+        if (set === null) return respArrayOfBulks([]);
+        return respArrayOfBulks([...set]);
+    }
+
+    if (command === "SCARD") {
+        if (args.length !== 2) return wrongArity("SCARD");
+        const key = args[1];
+        const set = database.getSet(key);
+        if (set === undefined) return respError(WRONGTYPE);
+        return respInt(set === null ? 0 : set.size);
+    }
+
+    if (command === "SISMEMBER") {
+        if (args.length !== 3) return wrongArity("SISMEMBER");
+        const key = args[1];
+        const set = database.getSet(key);
+        if (set === undefined) return respError(WRONGTYPE);
+        return respInt(set !== null && set.has(String(args[2])) ? 1 : 0);
+    }
+
+    if (command === "SUNION") {
+        if (args.length < 2) return wrongArity("SUNION");
+        const result = new Set();
+        for (let i = 1; i < args.length; i++) {
+            const set = database.getSet(args[i]);
+            if (set === undefined) return respError(WRONGTYPE);
+            if (set !== null) for (const m of set) result.add(m);
+        }
+        return respArrayOfBulks([...result]);
+    }
+
+    if (command === "SINTER") {
+        if (args.length < 2) return wrongArity("SINTER");
+        const sets = [];
+        for (let i = 1; i < args.length; i++) {
+            const set = database.getSet(args[i]);
+            if (set === undefined) return respError(WRONGTYPE);
+            sets.push(set === null ? new Set() : set);
+        }
+        // Start from the smallest set for efficiency
+        sets.sort((a, b) => a.size - b.size);
+        const result = new Set([...sets[0]].filter(m => sets.every(s => s.has(m))));
+        return respArrayOfBulks([...result]);
+    }
+
+    if (command === "SDIFF") {
+        if (args.length < 2) return wrongArity("SDIFF");
+        const first = database.getSet(args[1]);
+        if (first === undefined) return respError(WRONGTYPE);
+        if (first === null) return respArrayOfBulks([]);
+        const result = new Set(first);
+        for (let i = 2; i < args.length; i++) {
+            const set = database.getSet(args[i]);
+            if (set === undefined) return respError(WRONGTYPE);
+            if (set !== null) for (const m of set) result.delete(m);
+        }
+        return respArrayOfBulks([...result]);
     }
 
     if (command === "INCR" || command === "DECR") {

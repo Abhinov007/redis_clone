@@ -72,6 +72,34 @@ function getHash(key) {
     return entry.value;
 }
 
+function getOrCreateSet(key) {
+    const entry = getEntry(key);
+    if (!entry) {
+        const newEntry = { type: "set", value: new Set() };
+        setEntry(key, newEntry);
+        return newEntry.value;
+    }
+    if (typeof entry === "string") return undefined;
+    if (entry.type !== "set") return undefined;
+    return entry.value;
+}
+
+function getSet(key) {
+    const entry = getEntry(key);
+    if (!entry) return null;
+    if (typeof entry === "string") return undefined;
+    if (entry.type !== "set") return undefined;
+    return entry.value;
+}
+
+/** Return the type string for a key ("string"|"list"|"hash"|"set"|"none"). */
+function getType(key) {
+    const entry = getEntry(key);
+    if (!entry) return "none";
+    if (typeof entry === "string") return "string";
+    return entry.type || "none";
+}
+
 module.exports = {
     getEntry,
     setEntry,
@@ -81,6 +109,9 @@ module.exports = {
     getList,
     getOrCreateHash,
     getHash,
+    getOrCreateSet,
+    getSet,
+    getType,
     deleteKey,
     clearDatabase,
     getAll

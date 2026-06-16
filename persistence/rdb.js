@@ -39,6 +39,11 @@ function serializeEntry(entry) {
         return { type: "hash", value: Object.fromEntries(map) };
     }
 
+    if (entry.type === "set") {
+        const members = entry.value instanceof Set ? [...entry.value].map(String) : [];
+        return { type: "set", value: members };
+    }
+
     // Unknown type fallback
     return { type: "string", value: String(entry.value ?? "") };
 }
@@ -124,6 +129,9 @@ function load_Rdb(database) {
                 } else if (stored.type === "hash") {
                     const obj = stored.value && typeof stored.value === "object" ? stored.value : {};
                     database.set(key, { type: "hash", value: new Map(Object.entries(obj)) });
+                } else if (stored.type === "set") {
+                    const members = Array.isArray(stored.value) ? stored.value.map(String) : [];
+                    database.set(key, { type: "set", value: new Set(members) });
                 }
                 continue;
             }
@@ -170,6 +178,9 @@ function loadRDBFromBuffer(buffer, database) {
                 } else if (stored.type === "hash") {
                     const obj = stored.value && typeof stored.value === "object" ? stored.value : {};
                     database.set(key, { type: "hash", value: new Map(Object.entries(obj)) });
+                } else if (stored.type === "set") {
+                    const members = Array.isArray(stored.value) ? stored.value.map(String) : [];
+                    database.set(key, { type: "set", value: new Set(members) });
                 }
                 continue;
             }
