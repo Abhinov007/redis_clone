@@ -19,6 +19,8 @@ const replication = require("../replication/master");
 const WRITE_COMMANDS = new Set([
     "SET", "DEL", "HSET", "HDEL", "LPUSH", "RPUSH", "LPOP", "RPOP",
     "FLUSHALL", "INCR", "DECR",
+    "MSET", "SETNX", "APPEND", "INCRBY", "DECRBY", "LSET", "LTRIM",
+    "SADD", "SREM", "RENAME"
 ]);
 
 /**

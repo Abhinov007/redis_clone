@@ -17,6 +17,8 @@ Type Redis commands and watch the internal database, expiry store, AOF log, RDB 
 ### Core
 - **RESP Protocol** — full Redis Serialization Protocol parser with incremental TCP chunk handling
 - **4 data types** — Strings, Lists, Hashes, Sets
+- **Key-space completeness** — multi-key duplicate-aware `EXISTS`, key type inspection (`TYPE`), atomic key renaming with TTL preservation (`RENAME`), and Redis-compliant glob pattern matches (`*`, `?`, `[a-z]`) via converted regular expressions (`KEYS`).
+- **String & List completeness** — conditional writes (`SETNX`), multiple key mutations/fetches (`MSET`/`MGET`), value appending (`APPEND`), key length fetching (`STRLEN`), delta mutators (`INCRBY`/`DECRBY`), and bounds-safe negative-indexed list operations (`LINDEX`, `LSET`, `LTRIM` with auto-deletion on empty).
 - **Key expiry** — `SET key value EX seconds`, lazy eviction on read + active probabilistic sweep every 100 ms
 - **60+ commands** across all data types
 
